@@ -24,23 +24,21 @@ Na přijímací straně stačí po naskenování zavolat `decodePayload()` a pad
 
 ## Jak se drží minimální změna
 
-1. **Velký QR + nízké ECC** – po benchmarku napříč verzemi/ECC vyšlo nejlépe **version 40 + ECC L** (~0.3 % modulů / frame při pevném zobrazení).
+1. **Velký QR + ECC Q** – po dalším ladění (verze/ECC/algoritmus) vyšlo nejlépe **version 40 + ECC Q** (~0.27 % modulů / frame).
 2. **Dlouhý padding** – epoch je v dlouhém stringu, který vyplní kapacitu symbolu.
 3. **Výběr masky / pad mutantů** – hledá bližší kanonický frame vůči předchozímu.
-4. **ECC stabilizace** – z nového QR se vrátí maximum modulů z předchozího frame, dokud jsQR pořád čte nové URL.
+4. **Dual-direction ECC stabilizace** – hledá matici uvnitř dekódovacího „basin“ nového URL, která je co nejblíž předchozímu frame (from-old + from-new + mutace + polish).
+5. **Prefetch** – výpočet pro `epoch+1` běží už v průběhu aktuální sekundy (~1.4 s budget).
 
-### Výběr z měření (stabilize, ~0.7 s budget)
+### Orientační výsledky (stabilize)
 
-| version | ECC | avg flips | % modulů |
-| --- | --- | ---: | ---: |
-| 40 | L | ~105 | **~0.34 %** |
-| 35 | L | ~95 | ~0.39 % |
-| 30 | L | ~92 | ~0.49 % |
-| 25 | L | ~77 | ~0.56 % |
-| 10 | L | ~30 | ~0.92 % |
-| 15 | H (dříve) | ~60 | ~1.0 %+ |
+| config | avg flips | % modulů |
+| --- | ---: | ---: |
+| v40 + **Q** + dual + prefetch budget | ~85 | **~0.27 %** |
+| v40 + L + single-direction | ~100 | ~0.32 % |
+| v15 + H (starší) | ~60 | ~1.0 %+ |
 
-Nejnižší absolutní počet flipnutých modulů má menší QR (v10-L), ale při pevném zobrazení na obrazovce je rozhodující **podíl změněné plochy** → vítězí velký v40-L.
+Hard floor: dvě různá QR data musí ležet v různých RS codeword basins; pod ~0.2–0.25 % už typicky nejde bez změny protokolu (ne-standardní kódování mimo QR payload).
 
 ## UI
 
@@ -67,17 +65,3 @@ python3 -m http.server 4173
 ```
 
 Otevřít `http://127.0.0.1:4173/`.
-
-## Server-side příklad
-
-```js
-// Node / Edge
-const { decodePayload } = require("./js/codec.js"); // nebo zkopírovat funkci
-// po scanu:
-const epoch = decodePayload(scannedString);
-if (epoch != null) {
-  // validace freshness, auth, ...
-}
-```
-
-V prohlížeči je codec dostupný jako `window.Het68Codec`.

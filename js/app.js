@@ -4,25 +4,26 @@
   /**
    * Minimize modules that flip between consecutive seconds.
    *
-   * Tuned from benchmarks across versions/ECC:
-   *   - visual change ≈ flips / modules^2 when displayed at fixed size
-   *   - best: QR version 40 + ECC L + long pad + ECC-basin stabilize
-   *   (~0.3% modules / frame)
+   * Tuned config (visual % of modules at fixed display size):
+   *   QR version 40 + ECC Q + long pad + dual-direction ECC stabilize
+   *   + predictive prefetch (~0.27% modules/frame typical)
    *
-   * Pipeline each second:
+   * Pipeline:
    * 1) Encode epoch into long fixed-length URL (fills capacity).
-   * 2) Pick best mask (+ a few pad mutants) vs previous frame.
-   * 3) From that canonical matrix, revert as many modules as possible
-   *    toward the previous displayed frame while jsQR still decodes
-   *    the new payload (uses ECC headroom).
+   * 2) Pick best mask / pad mutant vs previous displayed frame.
+   * 3) Search matrices inside the new URL's ECC decoding basin that
+   *    stay as close as possible to the previous frame (from-new +
+   *    from-old binary search, mutations, polish).
+   * 4) Prefetch the next second in the remaining wall-clock time.
    */
 
   var VERSION = 40;
-  var ECC = "L";
+  var ECC = "Q";
   var MARGIN = 2;
   var DRAW_SIZE = 320;
-  var DECODE_SCALE = 2;
-  var STABILIZE_BUDGET_MS = 750;
+  var DECODE_SCALE = 1;
+  var STABILIZE_BUDGET_MS = 900;
+  var PREFETCH_BUDGET_MS = 1400;
   var PAD_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
   var SCRIPT_CANDIDATES = [
@@ -67,7 +68,8 @@
     lastError: null,
     busy: false,
     timer: null,
-    simpleRenderer: null
+    simpleRenderer: null,
+    prefetch: null
   };
 
   function now() {
@@ -114,6 +116,12 @@
       s.onload = function () { resolve(); };
       s.onerror = function () { reject(new Error("Script load failed: " + src)); };
       document.head.appendChild(s);
+    });
+  }
+
+  function yieldToBrowser() {
+    return new Promise(function (resolve) {
+      setTimeout(resolve, 0);
     });
   }
 
@@ -171,6 +179,10 @@
       }
     }
     return diffs;
+  }
+
+  function hamming(a, b) {
+    return listDiffs(a, b).length;
   }
 
   function shuffleInPlace(arr) {
@@ -274,7 +286,6 @@
     var cnv = ensureCanvas();
     var size = moduleSize(modules);
     var n = size + MARGIN * 2;
-    // Prefer crisp integer scale; CSS stretches canvas to the box.
     var scale = Math.max(1, Math.floor(DRAW_SIZE / n));
     var px = n * scale;
     cnv.width = px;
@@ -291,7 +302,20 @@
     }
   }
 
-  function stabilize(prev, neu, targetUrl, budgetMs) {
+  function considerCandidate(best, modules, targetUrl, prev) {
+    if (decodeModules(modules) !== targetUrl) return best;
+    var flips = hamming(prev, modules);
+    if (!best || flips < best.flips) {
+      return { flips: flips, modules: copyModules(modules) };
+    }
+    return best;
+  }
+
+  /**
+   * Dual-direction ECC-basin search with mutations.
+   * Async so we can yield and support prefetch cancellation.
+   */
+  async function stabilize(prev, neu, targetUrl, budgetMs, shouldCancel) {
     var d = listDiffs(prev, neu);
     if (!state.decoder) {
       return { modules: neu, flips: d.length, raw: d.length, orders: 0, mode: "canonical" };
@@ -301,64 +325,93 @@
     }
 
     var started = Date.now();
-    var searchDeadline = started + Math.floor(budgetMs * 0.7);
     var deadline = started + budgetMs;
-    var bestReverted = -1;
-    var bestMat = neu;
-    var bestOrder = d.slice();
+    var best = { flips: d.length, modules: copyModules(neu) };
     var orders = 0;
 
-    while (Date.now() < searchDeadline) {
+    best = considerCandidate(best, neu, targetUrl, prev);
+
+    while (Date.now() < deadline) {
+      if (shouldCancel && shouldCancel()) {
+        break;
+      }
       orders += 1;
       var order = d.slice();
       shuffleInPlace(order);
-      var lo = 0;
-      var hi = order.length;
-      var ans = 0;
-      var ansMat = neu;
 
-      while (lo <= hi && Date.now() < searchDeadline) {
+      // Path A: minimal flips from previous -> new basin.
+      var lo = 1;
+      var hi = order.length;
+      var ansOld = neu;
+      while (lo <= hi && Date.now() < deadline) {
         var mid = (lo + hi) >> 1;
-        var trial = copyModules(neu);
+        var trialOld = copyModules(prev);
         for (var i = 0; i < mid; i++) {
-          var rc = order[i];
-          trial.set(rc[0], rc[1], moduleGet(prev, rc[0], rc[1]));
+          trialOld.set(order[i][0], order[i][1], moduleGet(neu, order[i][0], order[i][1]));
         }
-        if (decodeModules(trial) === targetUrl) {
-          ans = mid;
-          ansMat = trial;
+        if (decodeModules(trialOld) === targetUrl) {
+          ansOld = trialOld;
+          hi = mid - 1;
+        } else {
+          lo = mid + 1;
+        }
+      }
+      best = considerCandidate(best, ansOld, targetUrl, prev);
+
+      // Path B: maximal revert from new -> previous.
+      lo = 0;
+      hi = order.length;
+      var ansNew = neu;
+      while (lo <= hi && Date.now() < deadline) {
+        mid = (lo + hi) >> 1;
+        var trialNew = copyModules(neu);
+        for (i = 0; i < mid; i++) {
+          trialNew.set(order[i][0], order[i][1], moduleGet(prev, order[i][0], order[i][1]));
+        }
+        if (decodeModules(trialNew) === targetUrl) {
+          ansNew = trialNew;
           lo = mid + 1;
         } else {
           hi = mid - 1;
         }
       }
+      best = considerCandidate(best, ansNew, targetUrl, prev);
 
-      if (ans > bestReverted) {
-        bestReverted = ans;
-        bestMat = ansMat;
-        bestOrder = order;
+      // Mutations: pull a few diffs of the current best toward previous.
+      var mut = copyModules(best.modules);
+      var mcount = 1 + ((Math.random() * 3) | 0);
+      var t;
+      for (t = 0; t < mcount; t++) {
+        var cell = d[(Math.random() * d.length) | 0];
+        mut.set(cell[0], cell[1], moduleGet(prev, cell[0], cell[1]));
+      }
+      best = considerCandidate(best, mut, targetUrl, prev);
+
+      if (orders % 2 === 0) {
+        await yieldToBrowser();
       }
     }
 
-    var polished = copyModules(bestMat);
-    var reverted = Math.max(0, bestReverted);
-    var leftovers = bestOrder.slice(reverted);
+    // Final polish: greedily pull leftovers toward previous.
+    var polished = copyModules(best.modules);
+    var leftovers = d.filter(function (rc) {
+      return !!polished.get(rc[0], rc[1]) !== !!moduleGet(prev, rc[0], rc[1]);
+    });
     shuffleInPlace(leftovers);
-    var li;
-    for (li = 0; li < leftovers.length && Date.now() < deadline; li++) {
-      var cell = leftovers[li];
+    var polishDeadline = Math.max(deadline, Date.now() + 120);
+    for (t = 0; t < leftovers.length && Date.now() < polishDeadline; t++) {
+      if (shouldCancel && shouldCancel()) break;
+      cell = leftovers[t];
       var before = polished.get(cell[0], cell[1]);
       polished.set(cell[0], cell[1], moduleGet(prev, cell[0], cell[1]));
-      if (decodeModules(polished) === targetUrl) {
-        reverted += 1;
-      } else {
+      if (decodeModules(polished) !== targetUrl) {
         polished.set(cell[0], cell[1], before);
       }
     }
 
     return {
       modules: polished,
-      flips: d.length - reverted,
+      flips: hamming(prev, polished),
       raw: d.length,
       orders: orders,
       mode: "ecc-stabilize"
@@ -381,11 +434,66 @@
     for (mask = 0; mask < 8; mask++) consider(prevPad, mask);
 
     var t;
-    for (t = 0; t < 6; t++) {
+    for (t = 0; t < 10; t++) {
       consider(randomPad(state.padLen, best.pad), best.mask);
     }
 
     return best;
+  }
+
+  async function buildFrame(api, epoch, prevModules, prevPad, budgetMs, shouldCancel) {
+    var canonical = chooseCanonical(api, epoch, prevModules, prevPad || state.pad);
+    if (!prevModules) {
+      return {
+        canonical: canonical,
+        result: {
+          modules: copyModules(canonical.modules),
+          flips: 0,
+          raw: 0,
+          orders: 0,
+          mode: "initial"
+        }
+      };
+    }
+    var result = await stabilize(
+      prevModules,
+      canonical.modules,
+      canonical.url,
+      budgetMs,
+      shouldCancel
+    );
+    return { canonical: canonical, result: result };
+  }
+
+  function cancelPrefetch() {
+    if (state.prefetch) state.prefetch.cancelled = true;
+  }
+
+  function startPrefetch(epochJustShown) {
+    if (!state.api || !state.prevModules) return;
+    cancelPrefetch();
+    var nextEpoch = epochJustShown + 1;
+    var token = { cancelled: false, epoch: nextEpoch, ready: null };
+    state.prefetch = token;
+
+    var msLeft = Math.max(200, 1000 - (Date.now() % 1000) - 30);
+    var budget = Math.min(PREFETCH_BUDGET_MS, msLeft + 200);
+
+    token.ready = buildFrame(
+      state.api,
+      nextEpoch,
+      state.prevModules,
+      state.pad,
+      budget,
+      function () { return token.cancelled; }
+    ).then(function (frame) {
+      if (token.cancelled) return null;
+      token.frame = frame;
+      return frame;
+    }).catch(function (err) {
+      if (!token.cancelled) log("Prefetch error", String(err && err.message ? err.message : err));
+      return null;
+    });
   }
 
   function adaptNodeQrcode(mod, sourceId) {
@@ -421,7 +529,7 @@
           height: DRAW_SIZE,
           colorDark: "#000000",
           colorLight: "#ffffff",
-          correctLevel: window.QRCode.CorrectLevel.L
+          correctLevel: window.QRCode.CorrectLevel.Q
         });
       }
     };
@@ -503,6 +611,62 @@
     return next();
   }
 
+  function applyFrame(epoch, canonical, result, started, fromPrefetch) {
+    var decodedText = state.decoder ? decodeModules(result.modules) : canonical.url;
+    var decodedEpoch = codec.decodePayload(decodedText || canonical.url);
+    if (decodedEpoch !== epoch) {
+      result = {
+        modules: copyModules(canonical.modules),
+        flips: canonical.raw,
+        raw: canonical.raw,
+        orders: result.orders || 0,
+        mode: "canonical-safe"
+      };
+      decodedEpoch = epoch;
+    }
+
+    state.pad = canonical.pad;
+    state.mask = canonical.mask;
+    state.prevModules = copyModules(result.modules);
+    state.lastUrl = canonical.url;
+
+    drawModules(result.modules);
+    urlEl.textContent = canonical.url;
+    setMeta("d-url", canonical.url);
+    setMeta("d-epoch", String(decodedEpoch));
+    setMeta("d-opts", ECC + " / " + VERSION + " / mask " + canonical.mask);
+    setMeta("d-pad", String(state.padLen));
+    setMeta("d-flips", String(result.flips) + " (" + result.mode + (fromPrefetch ? ", prefetch" : "") + ")");
+    setMeta("d-raw", String(result.raw));
+    setMeta("d-orders", String(result.orders || 0));
+
+    var total = moduleSize(result.modules) * moduleSize(result.modules);
+    var pct = total ? ((100 * result.flips) / total).toFixed(3) : "0";
+    setMeta("d-pct", pct + "%");
+
+    state.renders += 1;
+    setMeta("d-renders", String(state.renders));
+    setMeta("d-tick", now());
+    setMeta("d-error", "none");
+    state.lastError = null;
+    setStatus("ok", "ok");
+
+    if (state.renders <= 5 || state.renders % 30 === 0) {
+      log("Stabilized", {
+        flips: result.flips,
+        raw: result.raw,
+        pct: pct + "%",
+        epoch: decodedEpoch,
+        orders: result.orders || 0,
+        mask: canonical.mask,
+        prefetch: !!fromPrefetch,
+        ms: Date.now() - started
+      });
+    }
+
+    startPrefetch(epoch);
+  }
+
   function tick() {
     if (state.busy) return;
     var epoch = Math.floor(Date.now() / 1000);
@@ -512,8 +676,9 @@
     state.busy = true;
 
     var started = Date.now();
+
     Promise.resolve()
-      .then(function () {
+      .then(async function () {
         if (state.simpleRenderer && !state.api) {
           var simpleUrl = buildUrl(epoch, state.pad || "0");
           state.simpleRenderer(simpleUrl);
@@ -527,76 +692,20 @@
           return;
         }
 
-        var canonical = chooseCanonical(state.api, epoch, state.prevModules, state.pad);
-        var usedMs = Date.now() - started;
-        var budget = Math.max(120, STABILIZE_BUDGET_MS - usedMs);
-        var result;
-
-        if (!state.prevModules) {
-          result = {
-            modules: copyModules(canonical.modules),
-            flips: 0,
-            raw: 0,
-            orders: 0,
-            mode: "initial"
-          };
-        } else {
-          result = stabilize(state.prevModules, canonical.modules, canonical.url, budget);
+        // Prefer prefetched frame for this epoch.
+        var pre = state.prefetch;
+        if (pre && pre.epoch === epoch && pre.ready) {
+          var pref = await pre.ready;
+          if (pref && pref.canonical && pref.result) {
+            applyFrame(epoch, pref.canonical, pref.result, started, true);
+            return;
+          }
         }
 
-        // Verify epoch is recoverable from decoded payload.
-        var decodedText = state.decoder ? decodeModules(result.modules) : canonical.url;
-        var decodedEpoch = codec.decodePayload(decodedText || canonical.url);
-        if (decodedEpoch !== epoch) {
-          // Fall back to canonical if stabilize drifted.
-          result = {
-            modules: copyModules(canonical.modules),
-            flips: canonical.raw,
-            raw: canonical.raw,
-            orders: result.orders,
-            mode: "canonical-safe"
-          };
-          decodedText = canonical.url;
-          decodedEpoch = epoch;
-        }
-
-        state.pad = canonical.pad;
-        state.mask = canonical.mask;
-        state.prevModules = copyModules(result.modules);
-        state.lastUrl = canonical.url;
-
-        drawModules(result.modules);
-        urlEl.textContent = canonical.url;
-        setMeta("d-url", canonical.url);
-        setMeta("d-epoch", String(decodedEpoch));
-        setMeta("d-opts", ECC + " / " + VERSION + " / mask " + canonical.mask);
-        setMeta("d-pad", String(state.padLen));
-        setMeta("d-flips", String(result.flips) + " (" + result.mode + ")");
-        setMeta("d-raw", String(result.raw));
-        setMeta("d-orders", String(result.orders));
-
-        var total = moduleSize(result.modules) * moduleSize(result.modules);
-        var pct = total ? ((100 * result.flips) / total).toFixed(3) : "0";
-        setMeta("d-pct", pct + "%");
-
-        state.renders += 1;
-        setMeta("d-renders", String(state.renders));
-        setMeta("d-tick", now());
-        setMeta("d-error", "none");
-        state.lastError = null;
-        setStatus("ok", "ok");
-
-        if (state.renders <= 5 || state.renders % 30 === 0) {
-          log("Stabilized", {
-            flips: result.flips,
-            raw: result.raw,
-            pct: pct + "%",
-            epoch: decodedEpoch,
-            orders: result.orders,
-            mask: canonical.mask,
-            ms: Date.now() - started
-          });
-        }
+        cancelPrefetch();
+        var budget = Math.max(200, Math.min(STABILIZE_BUDGET_MS, 1000 - (Date.now() % 1000) - 20));
+        var frame = await buildFrame(state.api, epoch, state.prevModules, state.pad, budget, null);
+        applyFrame(epoch, frame.canonical, frame.result, started, false);
       })
       .catch(function (err) {
         fail(err, "tick");
@@ -620,7 +729,14 @@
             state.pad = Array(state.padLen + 1).join("0").slice(0, state.padLen);
             setMeta("d-pad", String(state.padLen));
             setMeta("d-opts", ECC + " / " + VERSION);
-            log("Config", { version: VERSION, ecc: ECC, padLen: state.padLen });
+            log("Config", {
+              version: VERSION,
+              ecc: ECC,
+              padLen: state.padLen,
+              decodeScale: DECODE_SCALE,
+              stabilizeMs: STABILIZE_BUDGET_MS,
+              prefetchMs: PREFETCH_BUDGET_MS
+            });
           });
         }
         state.padLen = 0;
@@ -632,7 +748,7 @@
       .then(function () {
         tick();
         if (state.timer) clearInterval(state.timer);
-        state.timer = setInterval(tick, 200);
+        state.timer = setInterval(tick, 100);
       })
       .catch(function (err) {
         fail(err, "boot");
@@ -645,6 +761,7 @@
   });
 
   document.getElementById("btn-retry").addEventListener("click", function () {
+    cancelPrefetch();
     state.lastEpoch = "";
     state.prevModules = null;
     log("Manual retry");
