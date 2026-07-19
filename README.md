@@ -1,52 +1,52 @@
 # qr_scrambler
 
-Jednoduchá single-page stránka, která každou sekundu generuje QR kód s URL:
+Single-page stránka, která každou sekundu ukazuje QR kód s časovým razítkem pro:
 
 ```text
-https://het68.cz/?qr=<unix-epoch>
+https://het68.cz/?qr=<epoch>.<pad>
 ```
 
-Cíl je mít scannovatelný QR, který se v čase mění, ale vizuální rozdíl mezi sekundami je co nejmenší.
+`<epoch>` je unix time v sekundách. `<pad>` je dlouhý filler, který vyplní kapacitu QR symbolu a slouží k minimalizaci vizuálních změn.
 
-## Chování
+## Cíl
 
-- černé pozadí, QR kód uprostřed
-- pod QR se zobrazuje aktuální adresa
-- maximální ECC (**H**)
-- primární engine používá **pevnou vyšší QR verzi (10)**, aby krátká URL nevyužila celou kapacitu a změny epochy byly méně patrné
-- dole je debug panel (engine, zdroj knihovny, URL, počet renderů, log chyb)
+S každou novou sekundou změnit **co nejméně modulů (pixelů)** QR kódu, při zachování:
 
-## Lokální assety (CDN jen jako fallback)
+- maximálního ECC (**H**)
+- scannovatelného QR s aktuálním epoch časem
 
-Všechny potřebné soubory jsou v repozitáři:
+## Jak se omezuje změna
+
+1. **Dlouhý payload** – epoch je zakódovaný do výrazně delšího stringu s pevným paddingem (QR verze 15, ECC H).
+2. **Výběr masky / pad mutantů** – pro novou sekundu se zkusí varianty, které mají menší Hammingovu vzdálenost vůči předchozímu frame.
+3. **ECC stabilizace** – z nového kanonického QR se zpětně „vrátí“ co nejvíc modulů z předchozího frame, dokud jsQR pořád dekóduje nové URL. Využívá se opravná kapacita levelu H.
+
+Výsledek: mezi sekundami se typicky přepíše jen malé procento modulů místo velké části symbolu.
+
+## UI
+
+- černé pozadí, QR uprostřed
+- pod QR je aktuální URL
+- dole debug panel: engine, decoder, raw Δ, počet flipnutých modulů, %, maska, log
+
+## Lokální assety (CDN jen fallback)
 
 ```text
-index.html          # stránka
-css/styles.css      # styly
-js/app.js           # logika (tick + loader + debug)
+index.html
+css/styles.css
+js/app.js
 vendor/qrcode.min.js
+vendor/jsQR.js
 vendor/qrcodejs.min.js
 ```
 
-Pořadí načtení QR knihovny:
-
-1. `vendor/qrcode.min.js` (lokálně)
-2. `vendor/qrcodejs.min.js` (lokálně)
-3. CDN fallbacky stejných knihoven (jsDelivr / esm.sh / cdnjs)
-
-Stránka tedy funguje i offline / bez CDN, pokud jsou lokální `vendor/` soubory dostupné.
+Pořadí načtení encoderu: lokální `qrcode` → lokální `qrcodejs` → CDN.
+Decoder: lokální `jsQR` → CDN.
 
 ## Spuštění
-
-Stačí servírovat root adresáře libovolným static serverem, např.:
 
 ```bash
 python3 -m http.server 4173
 ```
 
-Pak otevřít `http://127.0.0.1:4173/`.
-
-## Poznámky
-
-- QR se přegeneruje jen když se změní epoch sekunda.
-- Debug panel jde sbalit kliknutím na hlavičku; tlačítko **Copy debug** zkopíruje stav do schránky.
+Otevřít `http://127.0.0.1:4173/`.

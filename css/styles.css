@@ -125,7 +125,7 @@ main {
 #debug dl {
   margin: 0 0 10px;
   display: grid;
-  grid-template-columns: 110px 1fr;
+  grid-template-columns: 90px 1fr;
   gap: 4px 10px;
 }
 
