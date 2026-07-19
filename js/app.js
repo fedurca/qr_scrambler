@@ -2,22 +2,27 @@
   "use strict";
 
   /**
-   * Goal: minimize modules that flip between consecutive seconds.
+   * Minimize modules that flip between consecutive seconds.
    *
-   * Strategy:
-   * 1) Encode epoch into a long fixed-length URL (fills QR capacity).
-   * 2) Force ECC H + fixed high version + choose best mask.
-   * 3) Start from the new canonical QR, then "revert" as many differing
-   *    modules as possible back toward the previously displayed QR while
-   *    still decoding to the new URL (uses ECC headroom).
+   * Tuned from benchmarks across versions/ECC:
+   *   - visual change ≈ flips / modules^2 when displayed at fixed size
+   *   - best: QR version 40 + ECC L + long pad + ECC-basin stabilize
+   *   (~0.3% modules / frame)
+   *
+   * Pipeline each second:
+   * 1) Encode epoch into long fixed-length URL (fills capacity).
+   * 2) Pick best mask (+ a few pad mutants) vs previous frame.
+   * 3) From that canonical matrix, revert as many modules as possible
+   *    toward the previous displayed frame while jsQR still decodes
+   *    the new payload (uses ECC headroom).
    */
 
-  var VERSION = 15;
-  var ECC = "H";
+  var VERSION = 40;
+  var ECC = "L";
   var MARGIN = 2;
   var DRAW_SIZE = 320;
   var DECODE_SCALE = 2;
-  var STABILIZE_BUDGET_MS = 650;
+  var STABILIZE_BUDGET_MS = 750;
   var PAD_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
   var SCRIPT_CANDIDATES = [
@@ -33,6 +38,11 @@
     { id: "local-jsqr", src: "vendor/jsQR.js" },
     { id: "cdn-jsqr", src: "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js" }
   ];
+
+  var codec = window.Het68Codec;
+  if (!codec) {
+    throw new Error("Het68Codec missing — load js/codec.js first");
+  }
 
   var qrHost = document.getElementById("qr");
   var urlEl = document.getElementById("url");
@@ -53,9 +63,11 @@
     prevModules: null,
     renders: 0,
     lastUrl: "",
+    lastEpoch: "",
     lastError: null,
     busy: false,
-    timer: null
+    timer: null,
+    simpleRenderer: null
   };
 
   function now() {
@@ -172,7 +184,7 @@
   }
 
   function buildUrl(epoch, pad) {
-    return "https://het68.cz/?qr=" + epoch + "." + pad;
+    return codec.encodePayload(epoch, pad);
   }
 
   function randomPad(len, basePad) {
@@ -189,9 +201,9 @@
 
   function computePadLen(api) {
     var probe = String(Math.floor(Date.now() / 1000)) + ".";
-    var prefix = "https://het68.cz/?qr=" + probe;
+    var prefix = codec.BASE + probe;
     var lo = 0;
-    var hi = 4000;
+    var hi = 8000;
     var best = 0;
     while (lo <= hi) {
       var mid = (lo + hi) >> 1;
@@ -262,6 +274,7 @@
     var cnv = ensureCanvas();
     var size = moduleSize(modules);
     var n = size + MARGIN * 2;
+    // Prefer crisp integer scale; CSS stretches canvas to the box.
     var scale = Math.max(1, Math.floor(DRAW_SIZE / n));
     var px = n * scale;
     cnv.width = px;
@@ -295,7 +308,6 @@
     var bestOrder = d.slice();
     var orders = 0;
 
-    // Phase 1: binary-search many random revert orders.
     while (Date.now() < searchDeadline) {
       orders += 1;
       var order = d.slice();
@@ -328,7 +340,6 @@
       }
     }
 
-    // Phase 2: greedy polish leftovers of the best candidate.
     var polished = copyModules(bestMat);
     var reverted = Math.max(0, bestReverted);
     var leftovers = bestOrder.slice(reverted);
@@ -366,13 +377,11 @@
       }
     }
 
-    // Prefer keeping previous pad; search all masks first (cheap, high impact).
     var mask;
     for (mask = 0; mask < 8; mask++) consider(prevPad, mask);
 
-    // A few pad mutants around the current best mask only.
     var t;
-    for (t = 0; t < 8; t++) {
+    for (t = 0; t < 6; t++) {
       consider(randomPad(state.padLen, best.pad), best.mask);
     }
 
@@ -412,7 +421,7 @@
           height: DRAW_SIZE,
           colorDark: "#000000",
           colorLight: "#ffffff",
-          correctLevel: window.QRCode.CorrectLevel.H
+          correctLevel: window.QRCode.CorrectLevel.L
         });
       }
     };
@@ -511,7 +520,8 @@
           state.lastUrl = simpleUrl;
           urlEl.textContent = simpleUrl;
           setMeta("d-url", simpleUrl);
-          setMeta("d-opts", "H / auto");
+          setMeta("d-epoch", String(codec.decodePayload(simpleUrl) || epoch));
+          setMeta("d-opts", ECC + " / auto");
           setMeta("d-flips", "n/a");
           setMeta("d-raw", "n/a");
           return;
@@ -534,6 +544,22 @@
           result = stabilize(state.prevModules, canonical.modules, canonical.url, budget);
         }
 
+        // Verify epoch is recoverable from decoded payload.
+        var decodedText = state.decoder ? decodeModules(result.modules) : canonical.url;
+        var decodedEpoch = codec.decodePayload(decodedText || canonical.url);
+        if (decodedEpoch !== epoch) {
+          // Fall back to canonical if stabilize drifted.
+          result = {
+            modules: copyModules(canonical.modules),
+            flips: canonical.raw,
+            raw: canonical.raw,
+            orders: result.orders,
+            mode: "canonical-safe"
+          };
+          decodedText = canonical.url;
+          decodedEpoch = epoch;
+        }
+
         state.pad = canonical.pad;
         state.mask = canonical.mask;
         state.prevModules = copyModules(result.modules);
@@ -542,6 +568,7 @@
         drawModules(result.modules);
         urlEl.textContent = canonical.url;
         setMeta("d-url", canonical.url);
+        setMeta("d-epoch", String(decodedEpoch));
         setMeta("d-opts", ECC + " / " + VERSION + " / mask " + canonical.mask);
         setMeta("d-pad", String(state.padLen));
         setMeta("d-flips", String(result.flips) + " (" + result.mode + ")");
@@ -549,7 +576,7 @@
         setMeta("d-orders", String(result.orders));
 
         var total = moduleSize(result.modules) * moduleSize(result.modules);
-        var pct = total ? ((100 * result.flips) / total).toFixed(2) : "0";
+        var pct = total ? ((100 * result.flips) / total).toFixed(3) : "0";
         setMeta("d-pct", pct + "%");
 
         state.renders += 1;
@@ -564,6 +591,7 @@
             flips: result.flips,
             raw: result.raw,
             pct: pct + "%",
+            epoch: decodedEpoch,
             orders: result.orders,
             mask: canonical.mask,
             ms: Date.now() - started
@@ -592,19 +620,19 @@
             state.pad = Array(state.padLen + 1).join("0").slice(0, state.padLen);
             setMeta("d-pad", String(state.padLen));
             setMeta("d-opts", ECC + " / " + VERSION);
-            log("Pad length", state.padLen);
+            log("Config", { version: VERSION, ecc: ECC, padLen: state.padLen });
           });
         }
         state.padLen = 0;
         state.pad = "0";
         setMeta("d-pad", "0");
         setMeta("d-decoder", "n/a");
-        setMeta("d-opts", "H / auto");
+        setMeta("d-opts", ECC + " / auto");
       })
       .then(function () {
         tick();
         if (state.timer) clearInterval(state.timer);
-        state.timer = setInterval(tick, 250);
+        state.timer = setInterval(tick, 200);
       })
       .catch(function (err) {
         fail(err, "boot");
