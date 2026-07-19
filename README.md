@@ -41,11 +41,22 @@ Na přijímací straně stačí po naskenování zavolat `decodePayload()` a pad
 
 Hard floor: dvě různá QR data musí ležet v různých RS codeword basins; pod ~0.2–0.25 % už typicky nejde bez změny protokolu (ne-standardní kódování mimo QR payload).
 
+## Typická změna mezi snímky
+
+| profil | moduly (flips) | podíl | ~CSS px (QR ~360 px) |
+| --- | ---: | ---: | ---: |
+| desktop v40/Q | **~45–65** | **~0.15–0.20 %** | **~180–250 px** |
+| mobil v25/Q | ~50–60 | ~0.38–0.45 % | ~350–420 px |
+
+Debug pole `~CSS px` ukazuje odhad podle aktuální velikosti QR na obrazovce.
+
 ## UI
 
 - černé pozadí, QR uprostřed
 - pod QR aktuální URL
-- debug: engine, decoder, epoch, raw Δ, flips, %
+- **Interval epochy (s)** – jak často se QR přegeneruje (default 1 s)
+- **Maskovací koule** – volitelné (default vypnuté); koule se odrážejí od hran okna a na chvíli zakryjí oblasti příští změny, pak uhnou, aby šel kód znovu číst
+- debug: engine, decoder, epoch, raw Δ, flips, %, ~CSS px
 
 ## Lokální assety (CDN jen fallback)
 

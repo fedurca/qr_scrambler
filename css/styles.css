@@ -83,6 +83,65 @@ main {
   color: #d0d0d0;
 }
 
+#controls {
+  width: min(100%, 360px);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+#controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#controls input[type="number"] {
+  width: 4.2rem;
+  background: #111;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  padding: 4px 6px;
+  font: inherit;
+}
+
+#controls input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+}
+
+#ball-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+  display: none;
+  overflow: hidden;
+}
+
+.mask-ball {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #3a3a3a 0%, #0a0a0a 55%, #000 100%);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+  opacity: 0.92;
+  will-change: transform;
+}
+
+.mask-ball.is-cover {
+  background: radial-gradient(circle at 35% 30%, #5a5a5a 0%, #111 50%, #000 100%);
+  opacity: 0.97;
+}
+
 #debug {
   position: fixed;
   left: 12px;

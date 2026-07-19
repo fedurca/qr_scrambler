@@ -67,14 +67,49 @@
     renders: 0,
     lastUrl: "",
     lastEpoch: "",
+    lastSlot: "",
     lastError: null,
     busy: false,
     timer: null,
     simpleRenderer: null,
     prefetch: null,
     renderMode: "none",
-    paintEl: null
+    paintEl: null,
+    epochIntervalSec: 1,
+    maskBalls: null,
+    pendingDiffs: null
   };
+
+  function getEpochIntervalSec() {
+    var n = parseInt(state.epochIntervalSec, 10);
+    if (!isFinite(n) || n < 1) return 1;
+    if (n > 120) return 120;
+    return n;
+  }
+
+  function currentSlot() {
+    return Math.floor(Date.now() / 1000 / getEpochIntervalSec());
+  }
+
+  function slotChangeAtMs(slot) {
+    // Wall-clock ms when this slot index begins.
+    return slot * getEpochIntervalSec() * 1000;
+  }
+
+  function estimateCssPx(flips, modules) {
+    var size = moduleSize(modules);
+    var n = size + MARGIN * 2;
+    var host = qrHost.getBoundingClientRect();
+    var side = Math.max(host.width, 1);
+    var pxPer = side / n;
+    return Math.round(flips * pxPer * pxPer);
+  }
+
+  function getQrContentRect() {
+    var el = state.paintEl || qrHost.querySelector("canvas,svg,img");
+    if (!el) return null;
+    return el.getBoundingClientRect();
+  }
 
   function now() {
     return new Date().toISOString().slice(11, 23);
@@ -602,14 +637,38 @@
     if (state.prefetch) state.prefetch.cancelled = true;
   }
 
-  function startPrefetch(epochJustShown) {
+  function planMaskBallsFromFrame(frame, changeAtMs) {
+    if (!state.maskBalls || !state.maskBalls.enabled || !frame || !state.prevModules) return;
+    var nextMods = frame.result.modules;
+    var diffs = listDiffs(state.prevModules, nextMods);
+    state.pendingDiffs = diffs;
+    state.maskBalls.planForDiffs(diffs, {
+      moduleSize: moduleSize(nextMods),
+      margin: MARGIN,
+      changeAtMs: changeAtMs,
+      intervalMs: getEpochIntervalSec() * 1000
+    });
+    setMeta("d-balls", "on (" + (state.maskBalls.missions ? state.maskBalls.missions.length : 0) + ")");
+  }
+
+  function startPrefetch(slotJustShown) {
     if (!state.api || !state.prevModules) return;
     cancelPrefetch();
-    var nextEpoch = epochJustShown + 1;
-    var token = { cancelled: false, epoch: nextEpoch, ready: null };
+    var interval = getEpochIntervalSec();
+    var nextSlot = slotJustShown + 1;
+    // Predict unix epoch near the start of the next slot.
+    var nextEpoch = nextSlot * interval;
+    var token = {
+      cancelled: false,
+      slot: nextSlot,
+      epoch: nextEpoch,
+      ready: null
+    };
     state.prefetch = token;
-    var msLeft = Math.max(150, 1000 - (Date.now() % 1000) - 40);
-    var budget = Math.min(PREFETCH_BUDGET_MS, msLeft + 150);
+
+    var changeAt = slotChangeAtMs(nextSlot);
+    var msLeft = Math.max(200, changeAt - Date.now() - 40);
+    var budget = Math.min(PREFETCH_BUDGET_MS, Math.max(STABILIZE_BUDGET_MS, msLeft * 0.85));
 
     token.ready = buildFrame(
       state.api,
@@ -621,6 +680,8 @@
     ).then(function (frame) {
       if (token.cancelled) return null;
       token.frame = frame;
+      // Plan ball trajectories as soon as next matrix is known.
+      planMaskBallsFromFrame(frame, changeAt);
       return frame;
     }).catch(function (err) {
       if (!token.cancelled) log("Prefetch error", String(err && err.message ? err.message : err));
@@ -766,6 +827,8 @@
     var total = moduleSize(result.modules) * moduleSize(result.modules);
     var pct = total ? ((100 * result.flips) / total).toFixed(3) : "0";
     setMeta("d-pct", pct + "%");
+    setMeta("d-csspx", String(estimateCssPx(result.flips, result.modules)));
+    setMeta("d-interval", getEpochIntervalSec() + " s");
 
     state.renders += 1;
     setMeta("d-renders", String(state.renders));
@@ -774,27 +837,38 @@
     state.lastError = null;
     setStatus("ok", "ok");
 
+    if (state.maskBalls && state.maskBalls.enabled) {
+      state.maskBalls.notifyChanged();
+    }
+
     if (state.renders <= 5 || state.renders % 30 === 0) {
       log("Stabilized", {
         flips: result.flips,
         raw: result.raw,
         pct: pct + "%",
+        cssPx: estimateCssPx(result.flips, result.modules),
         epoch: decodedEpoch,
+        interval: getEpochIntervalSec(),
         render: state.renderMode,
         prefetch: !!fromPrefetch,
         ms: Date.now() - started
       });
     }
 
-    startPrefetch(epoch);
+    startPrefetch(currentSlot());
   }
 
   function tick() {
     if (state.busy) return;
+    var interval = getEpochIntervalSec();
+    var slot = currentSlot();
+    var slotKey = String(slot) + "@" + interval;
+    if (slotKey === state.lastSlot) return;
+    state.lastSlot = slotKey;
+
+    // Encode the unix epoch at the moment of the step (not the slot index).
     var epoch = Math.floor(Date.now() / 1000);
-    var epochKey = String(epoch);
-    if (epochKey === state.lastEpoch) return;
-    state.lastEpoch = epochKey;
+    state.lastEpoch = String(epoch);
     state.busy = true;
     var started = Date.now();
 
@@ -824,16 +898,22 @@
         setStatus("warn", "refine");
 
         var pre = state.prefetch;
-        if (pre && pre.epoch === epoch && pre.ready) {
+        if (pre && pre.slot === slot && pre.ready) {
           var pref = await pre.ready;
           if (pref && pref.canonical && pref.result) {
-            applyFrame(epoch, pref.canonical, pref.result, started, true);
-            return;
+            var prefEpoch = codec.decodePayload(pref.canonical.url);
+            if (prefEpoch === epoch) {
+              applyFrame(epoch, pref.canonical, pref.result, started, true);
+              return;
+            }
+            // Prediction drifted by a second — keep matrix search warm via rebuild.
+            log("Prefetch epoch drift", { prefEpoch: prefEpoch, epoch: epoch });
           }
         }
 
         cancelPrefetch();
-        var budget = Math.max(120, Math.min(STABILIZE_BUDGET_MS, 1000 - (Date.now() % 1000) - 30));
+        var msIntoSlot = Date.now() - slotChangeAtMs(slot);
+        var budget = Math.max(120, Math.min(STABILIZE_BUDGET_MS, interval * 1000 - msIntoSlot - 40));
         var frame = await buildFrame(state.api, epoch, state.prevModules, state.pad, budget, null);
         applyFrame(epoch, frame.canonical, frame.result, started, false);
       })
@@ -846,9 +926,54 @@
       });
   }
 
+  function bindControls() {
+    var intervalInput = document.getElementById("epoch-interval");
+    var ballsToggle = document.getElementById("mask-balls-toggle");
+
+    if (typeof MaskBalls === "function") {
+      state.maskBalls = new MaskBalls({
+        getQrRect: getQrContentRect,
+        onLog: function (msg, detail) { log(msg, detail); }
+      });
+    }
+
+    if (intervalInput) {
+      state.epochIntervalSec = parseInt(intervalInput.value, 10) || 1;
+      setMeta("d-interval", getEpochIntervalSec() + " s");
+      intervalInput.addEventListener("change", function () {
+        state.epochIntervalSec = parseInt(intervalInput.value, 10) || 1;
+        intervalInput.value = String(getEpochIntervalSec());
+        setMeta("d-interval", getEpochIntervalSec() + " s");
+        cancelPrefetch();
+        state.lastSlot = "";
+        log("Epoch interval set", getEpochIntervalSec() + "s");
+        tick();
+      });
+    }
+
+    if (ballsToggle) {
+      ballsToggle.checked = false;
+      setMeta("d-balls", "off");
+      ballsToggle.addEventListener("change", function () {
+        var on = !!ballsToggle.checked;
+        if (state.maskBalls) state.maskBalls.setEnabled(on);
+        setMeta("d-balls", on ? "on" : "off");
+        log("Mask balls", on ? "enabled" : "disabled");
+        if (on && state.prefetch && state.prefetch.frame) {
+          planMaskBallsFromFrame(state.prefetch.frame, slotChangeAtMs(currentSlot() + 1));
+        } else if (on && state.prefetch && state.prefetch.ready) {
+          state.prefetch.ready.then(function (frame) {
+            if (frame) planMaskBallsFromFrame(frame, slotChangeAtMs(currentSlot() + 1));
+          });
+        }
+      });
+    }
+  }
+
   function start() {
     showPlaceholder("Načítám QR…");
     setMeta("d-render", "—");
+    bindControls();
     loadEngine()
       .then(function (engine) {
         if (engine.supportsStabilize) {
@@ -866,7 +991,8 @@
               padLen: state.padLen,
               mobile: IS_MOBILE,
               decodeScale: DECODE_SCALE,
-              stabilizeMs: STABILIZE_BUDGET_MS
+              stabilizeMs: STABILIZE_BUDGET_MS,
+              intervalSec: getEpochIntervalSec()
             });
           });
         }
@@ -894,6 +1020,7 @@
   document.getElementById("btn-retry").addEventListener("click", function () {
     cancelPrefetch();
     state.lastEpoch = "";
+    state.lastSlot = "";
     state.prevModules = null;
     log("Manual retry");
     if (!state.engineId) start();
@@ -913,6 +1040,8 @@
       mobile: IS_MOBILE,
       version: VERSION,
       ecc: ECC,
+      epochIntervalSec: getEpochIntervalSec(),
+      maskBalls: !!(state.maskBalls && state.maskBalls.enabled),
       padLen: state.padLen,
       mask: state.mask,
       renders: state.renders,
