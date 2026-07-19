@@ -7,26 +7,34 @@
   <style>
     :root {
       color-scheme: dark;
+      --bg: #000;
+      --fg: #e8e8e8;
+      --muted: #9a9a9a;
+      --panel: #111;
+      --border: #2a2a2a;
+      --ok: #6dca8c;
+      --warn: #e0b35a;
+      --err: #e07070;
     }
 
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
-    html,
-    body {
+    html, body {
       margin: 0;
       min-height: 100%;
-      background: #000;
-      color: #fff;
+      background: var(--bg);
+      color: var(--fg);
       font-family: "IBM Plex Mono", "SFMono-Regular", Menlo, Consolas, monospace;
     }
 
     body {
       min-height: 100vh;
-      display: grid;
-      place-items: center;
-      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      padding: 24px 24px 120px;
     }
 
     main {
@@ -42,12 +50,23 @@
       aspect-ratio: 1;
       background: #fff;
       padding: 16px;
+      display: grid;
+      place-items: center;
     }
 
-    #qr canvas {
+    #qr canvas,
+    #qr img {
       display: block;
       width: 100%;
       height: 100%;
+      object-fit: contain;
+    }
+
+    #qr .placeholder {
+      color: #666;
+      font-size: 13px;
+      text-align: center;
+      padding: 12px;
     }
 
     #url {
@@ -59,60 +78,421 @@
       word-break: break-all;
       color: #d0d0d0;
     }
+
+    #debug {
+      position: fixed;
+      left: 12px;
+      right: 12px;
+      bottom: 12px;
+      max-width: 720px;
+      margin: 0 auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--fg);
+      font-size: 12px;
+      line-height: 1.45;
+      z-index: 1000;
+    }
+
+    #debug header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      user-select: none;
+    }
+
+    #debug header strong {
+      font-weight: 600;
+    }
+
+    #debug .status-pill {
+      padding: 2px 8px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+
+    #debug .status-pill.ok { color: var(--ok); border-color: #2f5a3d; }
+    #debug .status-pill.warn { color: var(--warn); border-color: #5a4a2f; }
+    #debug .status-pill.err { color: var(--err); border-color: #5a2f2f; }
+
+    #debug .body {
+      display: none;
+      padding: 10px;
+      max-height: 40vh;
+      overflow: auto;
+    }
+
+    #debug.open .body { display: block; }
+
+    #debug dl {
+      margin: 0 0 10px;
+      display: grid;
+      grid-template-columns: 110px 1fr;
+      gap: 4px 10px;
+    }
+
+    #debug dt { color: var(--muted); }
+    #debug dd { margin: 0; word-break: break-all; }
+
+    #debug .log {
+      margin: 0;
+      padding: 8px;
+      background: #0a0a0a;
+      border: 1px solid var(--border);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 180px;
+      overflow: auto;
+    }
+
+    #debug .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    #debug button {
+      background: #1a1a1a;
+      color: var(--fg);
+      border: 1px solid var(--border);
+      padding: 6px 10px;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    #debug button:hover { background: #222; }
   </style>
 </head>
 <body>
   <main>
-    <div id="qr" aria-label="QR kód"></div>
+    <div id="qr" aria-label="QR kód">
+      <div class="placeholder">Načítám QR…</div>
+    </div>
     <p id="url"></p>
   </main>
 
-  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+  <aside id="debug" class="open" aria-label="Debug">
+    <header id="debug-toggle">
+      <strong>Debug</strong>
+      <span id="debug-status" class="status-pill warn">init</span>
+    </header>
+    <div class="body">
+      <dl>
+        <dt>engine</dt><dd id="d-engine">—</dd>
+        <dt>source</dt><dd id="d-source">—</dd>
+        <dt>ecc / ver</dt><dd id="d-opts">H / 10</dd>
+        <dt>url</dt><dd id="d-url">—</dd>
+        <dt>renders</dt><dd id="d-renders">0</dd>
+        <dt>last tick</dt><dd id="d-tick">—</dd>
+        <dt>last error</dt><dd id="d-error">none</dd>
+      </dl>
+      <pre id="d-log" class="log"></pre>
+      <div class="actions">
+        <button type="button" id="btn-retry">Retry render</button>
+        <button type="button" id="btn-clear">Clear log</button>
+        <button type="button" id="btn-copy">Copy debug</button>
+      </div>
+    </div>
+  </aside>
+
   <script>
-    /**
-     * Maximální ECC = Level H.
-     * Pevná vyšší verze (10) než je nutné pro krátkou URL:
-     * většina kapacity je padding, takže sekundové změny epochy
-     * přepisují menší podíl modulů a působí méně rušivě.
-     */
-    const QR_OPTS = {
-      errorCorrectionLevel: "H",
-      version: 10,
-      margin: 2,
-      width: 320,
-      color: {
-        dark: "#000000",
-        light: "#ffffff"
+    (function () {
+      "use strict";
+
+      var QR_OPTS = {
+        errorCorrectionLevel: "H",
+        version: 10,
+        margin: 2,
+        width: 320,
+        color: { dark: "#000000", light: "#ffffff" }
+      };
+
+      var SCRIPT_CANDIDATES = [
+        { id: "local-vendor", src: "vendor/qrcode.min.js", type: "classic" },
+        { id: "jsdelivr-esm", src: "https://cdn.jsdelivr.net/npm/qrcode@1.5.4/+esm", type: "esm" },
+        { id: "esm-sh", src: "https://esm.sh/qrcode@1.5.4", type: "esm" },
+        { id: "qrcodejs-cdnjs", src: "https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js", type: "qrcodejs" },
+        { id: "qrcodejs-jsdelivr", src: "https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs@gh-pages/qrcode.min.js", type: "qrcodejs" }
+      ];
+
+      var qrHost = document.getElementById("qr");
+      var urlEl = document.getElementById("url");
+      var debugEl = document.getElementById("debug");
+      var statusEl = document.getElementById("debug-status");
+      var logEl = document.getElementById("d-log");
+
+      var state = {
+        engine: null,
+        source: null,
+        renders: 0,
+        lastUrl: "",
+        lastError: null,
+        timer: null
+      };
+
+      function now() {
+        return new Date().toISOString().slice(11, 23);
       }
-    };
 
-    const qrHost = document.getElementById("qr");
-    const urlEl = document.getElementById("url");
-    const canvas = document.createElement("canvas");
-    qrHost.appendChild(canvas);
+      function setStatus(kind, text) {
+        statusEl.className = "status-pill " + kind;
+        statusEl.textContent = text;
+      }
 
-    let lastUrl = "";
+      function setMeta(id, value) {
+        var el = document.getElementById(id);
+        if (el) el.textContent = value;
+      }
 
-    function buildUrl(epoch) {
-      return "https://het68.cz/?qr=" + epoch;
-    }
+      function log(msg, detail) {
+        var line = "[" + now() + "] " + msg;
+        if (typeof detail !== "undefined") {
+          try {
+            line += " " + (typeof detail === "string" ? detail : JSON.stringify(detail));
+          } catch (e) {
+            line += " " + String(detail);
+          }
+        }
+        logEl.textContent += (logEl.textContent ? "\n" : "") + line;
+        logEl.scrollTop = logEl.scrollHeight;
+        if (window.console && console.log) console.log(line);
+      }
 
-    function render(url) {
-      return QRCode.toCanvas(canvas, url, QR_OPTS);
-    }
+      function fail(err, context) {
+        var message = err && err.message ? err.message : String(err);
+        state.lastError = (context ? context + ": " : "") + message;
+        setMeta("d-error", state.lastError);
+        setStatus("err", "error");
+        log("ERROR", state.lastError);
+      }
 
-    function tick() {
-      const url = buildUrl(Math.floor(Date.now() / 1000));
-      if (url === lastUrl) return;
-      lastUrl = url;
-      urlEl.textContent = url;
-      render(url).catch(function (err) {
-        console.error(err);
+      function buildUrl(epoch) {
+        return "https://het68.cz/?qr=" + epoch;
+      }
+
+      function clearQr() {
+        while (qrHost.firstChild) qrHost.removeChild(qrHost.firstChild);
+      }
+
+      function showPlaceholder(text) {
+        clearQr();
+        var div = document.createElement("div");
+        div.className = "placeholder";
+        div.textContent = text;
+        qrHost.appendChild(div);
+      }
+
+      function loadScript(src) {
+        return new Promise(function (resolve, reject) {
+          var s = document.createElement("script");
+          s.src = src;
+          s.async = true;
+          s.onload = function () { resolve(); };
+          s.onerror = function () { reject(new Error("Script load failed: " + src)); };
+          document.head.appendChild(s);
+        });
+      }
+
+      function loadEsm(src) {
+        return import(src);
+      }
+
+      function adaptNodeQrcode(mod, sourceId) {
+        var api = mod && (mod.toCanvas || mod.default) ? (mod.toCanvas ? mod : mod.default) : null;
+        if (!api || typeof api.toCanvas !== "function") {
+          throw new Error("Module missing toCanvas");
+        }
+        return {
+          id: "node-qrcode",
+          source: sourceId,
+          render: function (url) {
+            clearQr();
+            var canvas = document.createElement("canvas");
+            qrHost.appendChild(canvas);
+            return api.toCanvas(canvas, url, QR_OPTS).then(function () {
+              return { engine: "node-qrcode", mode: "canvas" };
+            });
+          }
+        };
+      }
+
+      function adaptQrcodejs(sourceId) {
+        if (typeof window.QRCode !== "function" || !window.QRCode.CorrectLevel) {
+          throw new Error("qrcodejs global missing");
+        }
+        return {
+          id: "qrcodejs",
+          source: sourceId,
+          render: function (url) {
+            clearQr();
+            // qrcodejs writes into the host element; no fixed version API
+            new window.QRCode(qrHost, {
+              text: url,
+              width: 320,
+              height: 320,
+              colorDark: "#000000",
+              colorLight: "#ffffff",
+              correctLevel: window.QRCode.CorrectLevel.H
+            });
+            return Promise.resolve({ engine: "qrcodejs", mode: "dom" });
+          }
+        };
+      }
+
+      function pickGlobalNodeQrcode(sourceId) {
+        // esbuild IIFE: global QRCode = { create, toCanvas, toDataURL, toString }
+        if (window.QRCode && typeof window.QRCode.toCanvas === "function") {
+          return adaptNodeQrcode(window.QRCode, sourceId);
+        }
+        return null;
+      }
+
+      function loadEngine() {
+        var chain = Promise.resolve();
+        var i = 0;
+
+        function tryNext() {
+          if (i >= SCRIPT_CANDIDATES.length) {
+            return Promise.reject(new Error("All QR engines failed to load"));
+          }
+          var cand = SCRIPT_CANDIDATES[i++];
+          log("Trying engine source", cand.id + " (" + cand.type + ")");
+          setMeta("d-source", "loading " + cand.id);
+          setStatus("warn", "loading");
+
+          var attempt;
+          if (cand.type === "esm") {
+            attempt = loadEsm(cand.src).then(function (mod) {
+              return adaptNodeQrcode(mod, cand.id);
+            });
+          } else if (cand.type === "qrcodejs") {
+            attempt = loadScript(cand.src).then(function () {
+              return adaptQrcodejs(cand.id);
+            });
+          } else {
+            attempt = loadScript(cand.src).then(function () {
+              var eng = pickGlobalNodeQrcode(cand.id);
+              if (!eng) throw new Error("Global QRCode.toCanvas not found after " + cand.id);
+              return eng;
+            });
+          }
+
+          return attempt.then(function (engine) {
+            state.engine = engine;
+            setMeta("d-engine", engine.id);
+            setMeta("d-source", engine.source);
+            if (engine.id === "qrcodejs") {
+              setMeta("d-opts", "H / auto");
+            } else {
+              setMeta("d-opts", "H / 10");
+            }
+            log("Engine ready", engine.id + " via " + engine.source);
+            setStatus("ok", "ready");
+            return engine;
+          }).catch(function (err) {
+            fail(err, cand.id);
+            return tryNext();
+          });
+        }
+
+        return tryNext();
+      }
+
+      function render(url) {
+        if (!state.engine) return Promise.reject(new Error("No engine"));
+        setMeta("d-url", url);
+        urlEl.textContent = url;
+        return state.engine.render(url).then(function (info) {
+          state.renders += 1;
+          state.lastError = null;
+          setMeta("d-renders", String(state.renders));
+          setMeta("d-error", "none");
+          setMeta("d-tick", now());
+          setStatus("ok", "ok");
+          if (state.renders <= 3 || state.renders % 30 === 0) {
+            log("Rendered", info.engine + "/" + info.mode + " #" + state.renders);
+          }
+        });
+      }
+
+      function tick() {
+        var url = buildUrl(Math.floor(Date.now() / 1000));
+        if (url === state.lastUrl) return;
+        state.lastUrl = url;
+        render(url).catch(function (err) {
+          fail(err, "render");
+          showPlaceholder("QR render failed — viz Debug");
+        });
+      }
+
+      function start() {
+        showPlaceholder("Načítám QR…");
+        loadEngine().then(function () {
+          tick();
+          if (state.timer) clearInterval(state.timer);
+          state.timer = setInterval(tick, 1000);
+        }).catch(function (err) {
+          fail(err, "boot");
+          showPlaceholder("QR knihovna se nenačetla — viz Debug");
+        });
+      }
+
+      document.getElementById("debug-toggle").addEventListener("click", function () {
+        debugEl.classList.toggle("open");
       });
-    }
 
-    tick();
-    setInterval(tick, 1000);
+      document.getElementById("btn-retry").addEventListener("click", function () {
+        state.lastUrl = "";
+        log("Manual retry");
+        if (!state.engine) {
+          start();
+        } else {
+          tick();
+        }
+      });
+
+      document.getElementById("btn-clear").addEventListener("click", function () {
+        logEl.textContent = "";
+      });
+
+      document.getElementById("btn-copy").addEventListener("click", function () {
+        var payload = {
+          engine: state.engine && state.engine.id,
+          source: state.engine && state.engine.source,
+          renders: state.renders,
+          lastUrl: state.lastUrl,
+          lastError: state.lastError,
+          log: logEl.textContent,
+          userAgent: navigator.userAgent,
+          href: location.href
+        };
+        var text = JSON.stringify(payload, null, 2);
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function () {
+            log("Debug copied to clipboard");
+          }).catch(function (err) {
+            fail(err, "clipboard");
+          });
+        } else {
+          log("Clipboard unavailable", text);
+        }
+      });
+
+      window.addEventListener("error", function (ev) {
+        fail(ev.error || ev.message, "window.error");
+      });
+      window.addEventListener("unhandledrejection", function (ev) {
+        fail(ev.reason, "unhandledrejection");
+      });
+
+      log("Boot", location.href);
+      start();
+    })();
   </script>
 </body>
 </html>
