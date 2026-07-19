@@ -23,6 +23,7 @@ body {
 
 body {
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -41,26 +42,35 @@ main {
 
 #qr {
   width: 100%;
-  aspect-ratio: 1;
+  aspect-ratio: 1 / 1;
   background: #fff;
-  padding: 16px;
-  display: grid;
-  place-items: center;
-}
-
-#qr canvas,
-#qr img {
+  padding: 12px;
   display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
+  position: relative;
+  overflow: hidden;
 }
 
 #qr .placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: #666;
   font-size: 13px;
   text-align: center;
   padding: 12px;
+}
+
+#qr canvas,
+#qr img,
+#qr svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  max-width: 100%;
+  background: #fff;
 }
 
 #url {
@@ -97,6 +107,7 @@ main {
   border-bottom: 1px solid var(--border);
   cursor: pointer;
   user-select: none;
+  -webkit-user-select: none;
 }
 
 #debug header strong {
@@ -116,8 +127,9 @@ main {
 #debug .body {
   display: none;
   padding: 10px;
-  max-height: 40vh;
+  max-height: 36vh;
   overflow: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 #debug.open .body { display: block; }
@@ -139,7 +151,7 @@ main {
   border: 1px solid var(--border);
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 180px;
+  max-height: 140px;
   overflow: auto;
 }
 

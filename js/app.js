@@ -2,28 +2,31 @@
   "use strict";
 
   /**
-   * Minimize modules that flip between consecutive seconds.
+   * Min-change QR generator with structure-aware search + mobile-safe render.
    *
-   * Tuned config (visual % of modules at fixed display size):
-   *   QR version 40 + ECC Q + long pad + dual-direction ECC stabilize
-   *   + predictive prefetch (~0.27% modules/frame typical)
-   *
-   * Pipeline:
-   * 1) Encode epoch into long fixed-length URL (fills capacity).
-   * 2) Pick best mask / pad mutant vs previous displayed frame.
-   * 3) Search matrices inside the new URL's ECC decoding basin that
-   *    stay as close as possible to the previous frame (from-new +
-   *    from-old binary search, mutations, polish).
-   * 4) Prefetch the next second in the remaining wall-clock time.
+   * Encoding: https://het68.cz/?qr=<epoch>.<pad>
+   * Render: canvas -> SVG -> PNG data URL (fallback chain)
+   * Search: pad-suffix mutations (end of QR data bitstream), mask search,
+   *         dual-direction ECC-basin stabilize with reserved-aware ordering.
    */
 
-  var VERSION = 40;
+  var IS_MOBILE = (function () {
+    try {
+      return /Android|iPhone|iPad|iPod|Mobile|IEMobile/i.test(navigator.userAgent)
+        || (navigator.maxTouchPoints > 1 && Math.min(screen.width, screen.height) < 900);
+    } catch (e) {
+      return false;
+    }
+  })();
+
+  // Desktop keeps denser v40/Q; mobile uses lighter profile so first paint works.
+  var VERSION = IS_MOBILE ? 25 : 40;
   var ECC = "Q";
   var MARGIN = 2;
-  var DRAW_SIZE = 320;
-  var DECODE_SCALE = 1;
-  var STABILIZE_BUDGET_MS = 900;
-  var PREFETCH_BUDGET_MS = 1400;
+  var DRAW_SIZE = IS_MOBILE ? 280 : 320;
+  var DECODE_SCALE = IS_MOBILE ? 2 : 1;
+  var STABILIZE_BUDGET_MS = IS_MOBILE ? 450 : 900;
+  var PREFETCH_BUDGET_MS = IS_MOBILE ? 700 : 1400;
   var PAD_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
   var SCRIPT_CANDIDATES = [
@@ -50,7 +53,6 @@
   var debugEl = document.getElementById("debug");
   var statusEl = document.getElementById("debug-status");
   var logEl = document.getElementById("d-log");
-  var canvas = null;
 
   var state = {
     api: null,
@@ -69,7 +71,9 @@
     busy: false,
     timer: null,
     simpleRenderer: null,
-    prefetch: null
+    prefetch: null,
+    renderMode: "none",
+    paintEl: null
   };
 
   function now() {
@@ -120,22 +124,16 @@
   }
 
   function yieldToBrowser() {
-    return new Promise(function (resolve) {
-      setTimeout(resolve, 0);
-    });
+    return new Promise(function (resolve) { setTimeout(resolve, 0); });
   }
 
-  function ensureCanvas() {
-    if (canvas && canvas.parentNode === qrHost) return canvas;
+  function clearQrHost() {
     while (qrHost.firstChild) qrHost.removeChild(qrHost.firstChild);
-    canvas = document.createElement("canvas");
-    qrHost.appendChild(canvas);
-    return canvas;
+    state.paintEl = null;
   }
 
   function showPlaceholder(text) {
-    canvas = null;
-    while (qrHost.firstChild) qrHost.removeChild(qrHost.firstChild);
+    clearQrHost();
     var div = document.createElement("div");
     div.className = "placeholder";
     div.textContent = text;
@@ -151,6 +149,14 @@
     return modules.data[row * moduleSize(modules) + col];
   }
 
+  function moduleReserved(modules, row, col) {
+    if (typeof modules.isReserved === "function") return !!modules.isReserved(row, col);
+    if (modules.reservedBit) {
+      return !!modules.reservedBit[row * moduleSize(modules) + col];
+    }
+    return false;
+  }
+
   function copyModules(src) {
     var size = moduleSize(src);
     var data = src.data
@@ -162,11 +168,16 @@
           }
           return out;
         })();
+    var reservedBit = src.reservedBit ? Uint8Array.from(src.reservedBit) : null;
     return {
       size: size,
       data: data,
+      reservedBit: reservedBit,
       get: function (row, col) { return this.data[row * this.size + col]; },
-      set: function (row, col, value) { this.data[row * this.size + col] = value ? 1 : 0; }
+      set: function (row, col, value) { this.data[row * this.size + col] = value ? 1 : 0; },
+      isReserved: function (row, col) {
+        return this.reservedBit ? !!this.reservedBit[row * this.size + col] : false;
+      }
     };
   }
 
@@ -195,18 +206,33 @@
     return arr;
   }
 
+  /**
+   * Structure-aware ordering: QR data is placed in a bottom-right zigzag.
+   * Prefer trying diffs in that region first (often tied to trailing pad bytes).
+   */
+  function structureSortDiffs(diffs, size) {
+    return diffs.slice().sort(function (a, b) {
+      var scoreA = a[0] + a[1] * 3 + (a[0] > size / 2 ? 0 : 40);
+      var scoreB = b[0] + b[1] * 3 + (b[0] > size / 2 ? 0 : 40);
+      return scoreB - scoreA;
+    });
+  }
+
   function buildUrl(epoch, pad) {
     return codec.encodePayload(epoch, pad);
   }
 
-  function randomPad(len, basePad) {
+  /** Mutate trailing pad chars (end of QR data codewords / padding bitstream). */
+  function mutatePadSuffix(basePad, len) {
     if (!basePad || basePad.length !== len) {
       return Array(len + 1).join("0").slice(0, len);
     }
     var chars = basePad.split("");
-    var changes = 1 + ((Math.random() * 3) | 0);
+    var tail = Math.max(8, Math.min(64, (len / 8) | 0));
+    var changes = 1 + ((Math.random() * 4) | 0);
     for (var i = 0; i < changes; i++) {
-      chars[(Math.random() * len) | 0] = PAD_ALPHABET[(Math.random() * PAD_ALPHABET.length) | 0];
+      var idx = len - 1 - ((Math.random() * tail) | 0);
+      chars[idx] = PAD_ALPHABET[(Math.random() * PAD_ALPHABET.length) | 0];
     }
     return chars.join("");
   }
@@ -224,9 +250,8 @@
           version: VERSION,
           errorCorrectionLevel: ECC
         });
-        if (q.version !== VERSION) {
-          hi = mid - 1;
-        } else {
+        if (q.version !== VERSION) hi = mid - 1;
+        else {
           best = mid;
           lo = mid + 1;
         }
@@ -245,13 +270,26 @@
     }).modules;
   }
 
+  function createImageDataSafe(width, height) {
+    try {
+      if (typeof ImageData === "function") {
+        return new ImageData(width, height);
+      }
+    } catch (e) { /* older WebKit */ }
+    var c = document.createElement("canvas");
+    c.width = width;
+    c.height = height;
+    return c.getContext("2d").createImageData(width, height);
+  }
+
   function paintToImageData(modules, scale, margin) {
     var size = moduleSize(modules);
     var n = size + margin * 2;
     var px = n * scale;
-    var img = new ImageData(px, px);
+    var img = createImageDataSafe(px, px);
     var data = img.data;
-    for (var i = 0; i < data.length; i += 4) {
+    var i;
+    for (i = 0; i < data.length; i += 4) {
       data[i] = 255;
       data[i + 1] = 255;
       data[i + 2] = 255;
@@ -275,22 +313,63 @@
 
   function decodeModules(modules) {
     if (!state.decoder) return null;
-    var img = paintToImageData(modules, DECODE_SCALE, MARGIN);
-    var result = state.decoder(img.data, img.width, img.height, {
-      inversionAttempts: "dontInvert"
-    });
-    return result && result.data ? result.data : null;
+    try {
+      var img = paintToImageData(modules, DECODE_SCALE, MARGIN);
+      var result = state.decoder(img.data, img.width, img.height, {
+        inversionAttempts: "dontInvert"
+      });
+      return result && result.data ? result.data : null;
+    } catch (e) {
+      return null;
+    }
   }
 
-  function drawModules(modules) {
-    var cnv = ensureCanvas();
+  function modulesToSvgMarkup(modules, margin) {
+    var size = moduleSize(modules);
+    var n = size + margin * 2;
+    var parts = [];
+    parts.push('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + n + " " + n + '" shape-rendering="crispEdges" width="100%" height="100%">');
+    parts.push('<rect width="100%" height="100%" fill="#ffffff"/>');
+    for (var r = 0; r < size; r++) {
+      for (var c = 0; c < size; c++) {
+        if (!moduleGet(modules, r, c)) continue;
+        parts.push('<rect x="' + (c + margin) + '" y="' + (r + margin) + '" width="1" height="1" fill="#000000"/>');
+      }
+    }
+    parts.push("</svg>");
+    return parts.join("");
+  }
+
+  function canvasHasInk(cnv) {
+    try {
+      var ctx = cnv.getContext("2d");
+      var w = Math.min(cnv.width, 64);
+      var h = Math.min(cnv.height, 64);
+      if (w < 2 || h < 2) return false;
+      var sample = ctx.getImageData(0, 0, w, h).data;
+      for (var i = 0; i < sample.length; i += 16) {
+        if (sample[i] < 250 || sample[i + 1] < 250 || sample[i + 2] < 250) return true;
+      }
+      return false;
+    } catch (e) {
+      // tainted / restricted — assume ok
+      return true;
+    }
+  }
+
+  function drawCanvas(modules) {
+    clearQrHost();
+    var cnv = document.createElement("canvas");
     var size = moduleSize(modules);
     var n = size + MARGIN * 2;
-    var scale = Math.max(1, Math.floor(DRAW_SIZE / n));
+    var scale = Math.max(2, Math.floor(DRAW_SIZE / n));
     var px = n * scale;
     cnv.width = px;
     cnv.height = px;
+    cnv.setAttribute("role", "img");
+    cnv.setAttribute("aria-label", "QR kód");
     var ctx = cnv.getContext("2d");
+    if (!ctx) throw new Error("canvas 2d unavailable");
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, px, px);
     ctx.fillStyle = "#000000";
@@ -300,6 +379,61 @@
         ctx.fillRect((c + MARGIN) * scale, (r + MARGIN) * scale, scale, scale);
       }
     }
+    qrHost.appendChild(cnv);
+    state.paintEl = cnv;
+    if (!canvasHasInk(cnv)) throw new Error("canvas appears blank");
+    state.renderMode = "canvas";
+  }
+
+  function drawSvg(modules) {
+    clearQrHost();
+    var wrap = document.createElement("div");
+    wrap.innerHTML = modulesToSvgMarkup(modules, MARGIN);
+    var svg = wrap.firstChild;
+    if (!svg) throw new Error("svg empty");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "QR kód");
+    qrHost.appendChild(svg);
+    state.paintEl = svg;
+    state.renderMode = "svg";
+  }
+
+  function drawImg(modules) {
+    clearQrHost();
+    var svg = modulesToSvgMarkup(modules, MARGIN);
+    var uri = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+    var img = document.createElement("img");
+    img.alt = "QR kód";
+    img.width = DRAW_SIZE;
+    img.height = DRAW_SIZE;
+    img.src = uri;
+    qrHost.appendChild(img);
+    state.paintEl = img;
+    state.renderMode = "img-svg";
+  }
+
+  function drawModules(modules) {
+    var errors = [];
+    // On mobile prefer SVG first (more reliable than canvas sizing).
+    var chain = IS_MOBILE
+      ? [drawSvg, drawImg, drawCanvas]
+      : [drawCanvas, drawSvg, drawImg];
+
+    // If previous mode worked, try it first.
+    if (state.renderMode === "svg") chain = [drawSvg, drawImg, drawCanvas];
+    if (state.renderMode === "img-svg") chain = [drawImg, drawSvg, drawCanvas];
+    if (state.renderMode === "canvas") chain = [drawCanvas, drawSvg, drawImg];
+
+    for (var i = 0; i < chain.length; i++) {
+      try {
+        chain[i](modules);
+        setMeta("d-render", state.renderMode);
+        return;
+      } catch (e) {
+        errors.push((chain[i].name || "draw") + ": " + (e && e.message ? e.message : e));
+      }
+    }
+    throw new Error("All render methods failed: " + errors.join(" | "));
   }
 
   function considerCandidate(best, modules, targetUrl, prev) {
@@ -311,35 +445,44 @@
     return best;
   }
 
-  /**
-   * Dual-direction ECC-basin search with mutations.
-   * Async so we can yield and support prefetch cancellation.
-   */
   async function stabilize(prev, neu, targetUrl, budgetMs, shouldCancel) {
     var d = listDiffs(prev, neu);
+    // Prefer non-reserved diffs (should be all of them for same version).
+    d = d.filter(function (rc) {
+      return !moduleReserved(neu, rc[0], rc[1]);
+    });
+    if (!d.length) d = listDiffs(prev, neu);
+
     if (!state.decoder) {
       return { modules: neu, flips: d.length, raw: d.length, orders: 0, mode: "canonical" };
     }
     if (decodeModules(neu) !== targetUrl) {
-      return { modules: neu, flips: d.length, raw: d.length, orders: 0, mode: "canonical-fallback" };
+      return { modules: neu, flips: listDiffs(prev, neu).length, raw: listDiffs(prev, neu).length, orders: 0, mode: "canonical-fallback" };
     }
 
     var started = Date.now();
     var deadline = started + budgetMs;
-    var best = { flips: d.length, modules: copyModules(neu) };
+    var best = { flips: listDiffs(prev, neu).length, modules: copyModules(neu) };
     var orders = 0;
+    var size = moduleSize(neu);
 
     best = considerCandidate(best, neu, targetUrl, prev);
 
     while (Date.now() < deadline) {
-      if (shouldCancel && shouldCancel()) {
-        break;
-      }
+      if (shouldCancel && shouldCancel()) break;
       orders += 1;
-      var order = d.slice();
-      shuffleInPlace(order);
 
-      // Path A: minimal flips from previous -> new basin.
+      var order;
+      if (orders === 1) {
+        order = structureSortDiffs(d, size);
+      } else if (orders === 2) {
+        order = structureSortDiffs(d, size).reverse();
+      } else {
+        order = d.slice();
+        shuffleInPlace(order);
+      }
+
+      // from-old
       var lo = 1;
       var hi = order.length;
       var ansOld = neu;
@@ -352,13 +495,11 @@
         if (decodeModules(trialOld) === targetUrl) {
           ansOld = trialOld;
           hi = mid - 1;
-        } else {
-          lo = mid + 1;
-        }
+        } else lo = mid + 1;
       }
       best = considerCandidate(best, ansOld, targetUrl, prev);
 
-      // Path B: maximal revert from new -> previous.
+      // from-new
       lo = 0;
       hi = order.length;
       var ansNew = neu;
@@ -371,48 +512,39 @@
         if (decodeModules(trialNew) === targetUrl) {
           ansNew = trialNew;
           lo = mid + 1;
-        } else {
-          hi = mid - 1;
-        }
+        } else hi = mid - 1;
       }
       best = considerCandidate(best, ansNew, targetUrl, prev);
 
-      // Mutations: pull a few diffs of the current best toward previous.
       var mut = copyModules(best.modules);
       var mcount = 1 + ((Math.random() * 3) | 0);
-      var t;
-      for (t = 0; t < mcount; t++) {
+      for (var t = 0; t < mcount; t++) {
         var cell = d[(Math.random() * d.length) | 0];
         mut.set(cell[0], cell[1], moduleGet(prev, cell[0], cell[1]));
       }
       best = considerCandidate(best, mut, targetUrl, prev);
 
-      if (orders % 2 === 0) {
-        await yieldToBrowser();
-      }
+      if (orders % 2 === 0) await yieldToBrowser();
     }
 
-    // Final polish: greedily pull leftovers toward previous.
     var polished = copyModules(best.modules);
     var leftovers = d.filter(function (rc) {
       return !!polished.get(rc[0], rc[1]) !== !!moduleGet(prev, rc[0], rc[1]);
     });
-    shuffleInPlace(leftovers);
-    var polishDeadline = Math.max(deadline, Date.now() + 120);
+    leftovers = structureSortDiffs(leftovers, size);
+    var polishDeadline = Math.max(deadline, Date.now() + 100);
     for (t = 0; t < leftovers.length && Date.now() < polishDeadline; t++) {
       if (shouldCancel && shouldCancel()) break;
       cell = leftovers[t];
       var before = polished.get(cell[0], cell[1]);
       polished.set(cell[0], cell[1], moduleGet(prev, cell[0], cell[1]));
-      if (decodeModules(polished) !== targetUrl) {
-        polished.set(cell[0], cell[1], before);
-      }
+      if (decodeModules(polished) !== targetUrl) polished.set(cell[0], cell[1], before);
     }
 
     return {
       modules: polished,
       flips: hamming(prev, polished),
-      raw: d.length,
+      raw: listDiffs(prev, neu).length,
       orders: orders,
       mode: "ecc-stabilize"
     };
@@ -433,9 +565,10 @@
     var mask;
     for (mask = 0; mask < 8; mask++) consider(prevPad, mask);
 
+    // Structure-aware: mutate pad suffix (trailing data/padding codewords).
     var t;
-    for (t = 0; t < 10; t++) {
-      consider(randomPad(state.padLen, best.pad), best.mask);
+    for (t = 0; t < 12; t++) {
+      consider(mutatePadSuffix(best.pad, state.padLen), best.mask);
     }
 
     return best;
@@ -475,9 +608,8 @@
     var nextEpoch = epochJustShown + 1;
     var token = { cancelled: false, epoch: nextEpoch, ready: null };
     state.prefetch = token;
-
-    var msLeft = Math.max(200, 1000 - (Date.now() % 1000) - 30);
-    var budget = Math.min(PREFETCH_BUDGET_MS, msLeft + 200);
+    var msLeft = Math.max(150, 1000 - (Date.now() % 1000) - 40);
+    var budget = Math.min(PREFETCH_BUDGET_MS, msLeft + 150);
 
     token.ready = buildFrame(
       state.api,
@@ -503,12 +635,7 @@
     if (!api || typeof api.create !== "function") {
       throw new Error("QR api missing create()");
     }
-    return {
-      id: "node-qrcode",
-      source: sourceId,
-      api: api,
-      supportsStabilize: true
-    };
+    return { id: "node-qrcode", source: sourceId, api: api, supportsStabilize: true };
   }
 
   function adaptQrcodejs(sourceId) {
@@ -521,8 +648,7 @@
       api: null,
       supportsStabilize: false,
       renderSimple: function (url) {
-        while (qrHost.firstChild) qrHost.removeChild(qrHost.firstChild);
-        canvas = null;
+        clearQrHost();
         new window.QRCode(qrHost, {
           text: url,
           width: DRAW_SIZE,
@@ -531,6 +657,8 @@
           colorLight: "#ffffff",
           correctLevel: window.QRCode.CorrectLevel.Q
         });
+        state.renderMode = "qrcodejs-dom";
+        setMeta("d-render", state.renderMode);
       }
     };
   }
@@ -551,9 +679,7 @@
       var cand = DECODER_CANDIDATES[i++];
       log("Trying decoder", cand.id);
       return loadScript(cand.src).then(function () {
-        if (typeof window.jsQR !== "function") {
-          throw new Error("jsQR global missing after " + cand.id);
-        }
+        if (typeof window.jsQR !== "function") throw new Error("jsQR global missing after " + cand.id);
         state.decoder = window.jsQR;
         state.decoderSource = cand.id;
         setMeta("d-decoder", cand.id);
@@ -579,13 +705,9 @@
 
       var attempt;
       if (cand.type === "esm") {
-        attempt = import(cand.src).then(function (mod) {
-          return adaptNodeQrcode(mod, cand.id);
-        });
+        attempt = import(cand.src).then(function (mod) { return adaptNodeQrcode(mod, cand.id); });
       } else if (cand.type === "qrcodejs") {
-        attempt = loadScript(cand.src).then(function () {
-          return adaptQrcodejs(cand.id);
-        });
+        attempt = loadScript(cand.src).then(function () { return adaptQrcodejs(cand.id); });
       } else {
         attempt = loadScript(cand.src).then(function () {
           var eng = pickGlobalNodeQrcode(cand.id);
@@ -634,11 +756,12 @@
     urlEl.textContent = canonical.url;
     setMeta("d-url", canonical.url);
     setMeta("d-epoch", String(decodedEpoch));
-    setMeta("d-opts", ECC + " / " + VERSION + " / mask " + canonical.mask);
+    setMeta("d-opts", ECC + " / " + VERSION + " / mask " + canonical.mask + (IS_MOBILE ? " / mobile" : ""));
     setMeta("d-pad", String(state.padLen));
     setMeta("d-flips", String(result.flips) + " (" + result.mode + (fromPrefetch ? ", prefetch" : "") + ")");
     setMeta("d-raw", String(result.raw));
     setMeta("d-orders", String(result.orders || 0));
+    setMeta("d-render", state.renderMode);
 
     var total = moduleSize(result.modules) * moduleSize(result.modules);
     var pct = total ? ((100 * result.flips) / total).toFixed(3) : "0";
@@ -657,8 +780,7 @@
         raw: result.raw,
         pct: pct + "%",
         epoch: decodedEpoch,
-        orders: result.orders || 0,
-        mask: canonical.mask,
+        render: state.renderMode,
         prefetch: !!fromPrefetch,
         ms: Date.now() - started
       });
@@ -674,7 +796,6 @@
     if (epochKey === state.lastEpoch) return;
     state.lastEpoch = epochKey;
     state.busy = true;
-
     var started = Date.now();
 
     Promise.resolve()
@@ -689,10 +810,19 @@
           setMeta("d-opts", ECC + " / auto");
           setMeta("d-flips", "n/a");
           setMeta("d-raw", "n/a");
+          setMeta("d-render", state.renderMode);
           return;
         }
 
-        // Prefer prefetched frame for this epoch.
+        // Immediate canonical paint so mobile never stays blank during search.
+        var quick = chooseCanonical(state.api, epoch, state.prevModules, state.pad);
+        drawModules(quick.modules);
+        urlEl.textContent = quick.url;
+        setMeta("d-url", quick.url);
+        setMeta("d-epoch", String(epoch));
+        setMeta("d-render", state.renderMode);
+        setStatus("warn", "refine");
+
         var pre = state.prefetch;
         if (pre && pre.epoch === epoch && pre.ready) {
           var pref = await pre.ready;
@@ -703,7 +833,7 @@
         }
 
         cancelPrefetch();
-        var budget = Math.max(200, Math.min(STABILIZE_BUDGET_MS, 1000 - (Date.now() % 1000) - 20));
+        var budget = Math.max(120, Math.min(STABILIZE_BUDGET_MS, 1000 - (Date.now() % 1000) - 30));
         var frame = await buildFrame(state.api, epoch, state.prevModules, state.pad, budget, null);
         applyFrame(epoch, frame.canonical, frame.result, started, false);
       })
@@ -718,6 +848,7 @@
 
   function start() {
     showPlaceholder("Načítám QR…");
+    setMeta("d-render", "—");
     loadEngine()
       .then(function (engine) {
         if (engine.supportsStabilize) {
@@ -728,14 +859,14 @@
             state.padLen = computePadLen(engine.api);
             state.pad = Array(state.padLen + 1).join("0").slice(0, state.padLen);
             setMeta("d-pad", String(state.padLen));
-            setMeta("d-opts", ECC + " / " + VERSION);
+            setMeta("d-opts", ECC + " / " + VERSION + (IS_MOBILE ? " / mobile" : ""));
             log("Config", {
               version: VERSION,
               ecc: ECC,
               padLen: state.padLen,
+              mobile: IS_MOBILE,
               decodeScale: DECODE_SCALE,
-              stabilizeMs: STABILIZE_BUDGET_MS,
-              prefetchMs: PREFETCH_BUDGET_MS
+              stabilizeMs: STABILIZE_BUDGET_MS
             });
           });
         }
@@ -778,6 +909,8 @@
       engine: state.engineId,
       source: state.source,
       decoder: state.decoderSource,
+      render: state.renderMode,
+      mobile: IS_MOBILE,
       version: VERSION,
       ecc: ECC,
       padLen: state.padLen,
@@ -793,9 +926,7 @@
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(function () {
         log("Debug copied to clipboard");
-      }).catch(function (err) {
-        fail(err, "clipboard");
-      });
+      }).catch(function (err) { fail(err, "clipboard"); });
     } else {
       log("Clipboard unavailable", text);
     }
@@ -808,6 +939,6 @@
     fail(ev.reason, "unhandledrejection");
   });
 
-  log("Boot", location.href);
+  log("Boot", location.href + (IS_MOBILE ? " [mobile]" : " [desktop]"));
   start();
 })();

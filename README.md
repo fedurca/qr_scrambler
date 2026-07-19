@@ -24,11 +24,12 @@ Na přijímací straně stačí po naskenování zavolat `decodePayload()` a pad
 
 ## Jak se drží minimální změna
 
-1. **Velký QR + ECC Q** – po dalším ladění (verze/ECC/algoritmus) vyšlo nejlépe **version 40 + ECC Q** (~0.27 % modulů / frame).
+1. **Velký QR + ECC Q** – desktop **v40/Q**, mobil **v25/Q** (lehčí profil kvůli renderu/CPU).
 2. **Dlouhý padding** – epoch je v dlouhém stringu, který vyplní kapacitu symbolu.
-3. **Výběr masky / pad mutantů** – hledá bližší kanonický frame vůči předchozímu.
-4. **Dual-direction ECC stabilizace** – hledá matici uvnitř dekódovacího „basin“ nového URL, která je co nejblíž předchozímu frame (from-old + from-new + mutace + polish).
-5. **Prefetch** – výpočet pro `epoch+1` běží už v průběhu aktuální sekundy (~1.4 s budget).
+3. **Structure-aware pad** – mutace hlavně **suffixu** padu (konec QR data bitstreamu / padding codewords).
+4. **Dual-direction ECC stabilizace** – from-old + from-new + mutace + polish, řazení diffů podle zigzag oblasti.
+5. **Prefetch** – výpočet pro `epoch+1` během aktuální sekundy.
+6. **Okamžitý canonical paint** + render fallback řetězec: **canvas → SVG → img(SVG)** (na mobilu SVG první).
 
 ### Orientační výsledky (stabilize)
 
