@@ -19,12 +19,24 @@
     }
   })();
 
-  // Max QR version 3 (29 modules ≈ 3 finder-sized blocks across).
-  var VERSION = 3;
-  var ECC = "L";
+  // Grid profile. Higher ECC = larger Reed-Solomon basin = the stabilizer may
+  // keep far more modules identical to the previous frame (fewer flips). The pad
+  // auto-fills to capacity (see computePadLen), so payload never overflows — the
+  // only cost of a higher version is module density, offset by a larger DRAW_SIZE.
+  // v4 + Q is one step denser than the old v3 (33x33 vs 29x29) but ~2.5x the EC
+  // budget. Switch to { version: 5, ecc: "H" } for the fewest flips once a cheap
+  // phone confirms readability. Boot logs "Grid measure" to compare profiles.
+  var VERSION = 4;
+  var ECC = "Q";
   var MARGIN = 2;
-  var DRAW_SIZE = IS_MOBILE ? 220 : 240;
+  var DRAW_SIZE = IS_MOBILE ? 260 : 300;
   var DECODE_SCALE = 4;
+  /** Candidate profiles for the boot-time flip measurement (tuning aid only). */
+  var GRID_PROFILES = [
+    { version: 4, ecc: "Q" },
+    { version: 5, ecc: "H" },
+    { version: 3, ecc: "L" }
+  ];
   var STABILIZE_BUDGET_MS = IS_MOBILE ? 350 : 500;
   var PREFETCH_BUDGET_MS = IS_MOBILE ? 550 : 800;
   var PAD_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -292,7 +304,9 @@
     return chars.join("");
   }
 
-  function computePadLen(api) {
+  function computePadLen(api, version, ecc) {
+    version = version || VERSION;
+    ecc = ecc || ECC;
     var probe = String(Math.floor(Date.now() / 1000)) + ".";
     var prefix = codec.BASE + probe;
     var lo = 0;
@@ -302,10 +316,10 @@
       var mid = (lo + hi) >> 1;
       try {
         var q = api.create(prefix + Array(mid + 1).join("A"), {
-          version: VERSION,
-          errorCorrectionLevel: ECC
+          version: version,
+          errorCorrectionLevel: ecc
         });
-        if (q.version !== VERSION) hi = mid - 1;
+        if (q.version !== version) hi = mid - 1;
         else {
           best = mid;
           lo = mid + 1;
@@ -317,10 +331,10 @@
     return best;
   }
 
-  function createModules(api, text, maskPattern) {
+  function createModules(api, text, maskPattern, version, ecc) {
     return api.create(text, {
-      version: VERSION,
-      errorCorrectionLevel: ECC,
+      version: version || VERSION,
+      errorCorrectionLevel: ecc || ECC,
       maskPattern: maskPattern
     }).modules;
   }
@@ -651,6 +665,76 @@
       shouldCancel
     );
     return { canonical: canonical, result: result };
+  }
+
+  function zeroPad(len) {
+    return len > 0 ? Array(len + 1).join("0") : "";
+  }
+
+  /** Canonical (min raw-diff) frame for an explicit profile — used by measureGrid. */
+  function canonicalForProfile(api, epoch, prevModules, prevPad, padLen, version, ecc) {
+    var best = null;
+    function consider(pad, mask) {
+      var url = buildUrl(epoch, pad);
+      var modules = createModules(api, url, mask, version, ecc);
+      var raw = prevModules ? listDiffs(prevModules, modules).length : 0;
+      if (!best || raw < best.raw) best = { url: url, pad: pad, mask: mask, modules: modules, raw: raw };
+    }
+    for (var mask = 0; mask < 8; mask++) consider(prevPad, mask);
+    for (var t = 0; t < 10; t++) consider(mutatePadSuffix(best.pad, padLen), best.mask);
+    return best;
+  }
+
+  /**
+   * Boot-time tuning aid: for each candidate grid profile, measure average
+   * stabilized flips over a few synthetic sequential epochs. Read-only w.r.t.
+   * live state; logged as "Grid measure" so a profile can be chosen after a
+   * real cheap-phone readability check. Never blocks the live tick.
+   */
+  async function measureGrid(api, steps) {
+    if (!api || !state.decoder) return;
+    steps = steps || 4;
+    var baseEpoch = Math.floor(Date.now() / 1000);
+    var results = [];
+    for (var pi = 0; pi < GRID_PROFILES.length; pi++) {
+      var prof = GRID_PROFILES[pi];
+      var padLen, prev = null, pad;
+      try {
+        padLen = computePadLen(api, prof.version, prof.ecc);
+        pad = zeroPad(padLen);
+      } catch (e) { continue; }
+      var flips = [];
+      var raws = [];
+      var size = 0;
+      for (var s = 0; s < steps; s++) {
+        var epoch = baseEpoch + 1000 + pi * 100 + s; // off live epochs
+        var canon = canonicalForProfile(api, epoch, prev, pad, padLen, prof.version, prof.ecc);
+        size = moduleSize(canon.modules);
+        if (prev) {
+          var res = await stabilize(prev, canon.modules, canon.url, 140, null);
+          flips.push(res.flips);
+          raws.push(res.raw);
+          prev = res.modules;
+        } else {
+          prev = canon.modules;
+        }
+        pad = canon.pad;
+        await yieldToBrowser();
+      }
+      var avg = function (a) { return a.length ? Math.round(a.reduce(function (x, y) { return x + y; }, 0) / a.length) : 0; };
+      var total = size * size;
+      results.push({
+        v: prof.version,
+        ecc: prof.ecc,
+        modules: size,
+        avgRaw: avg(raws),
+        avgFlips: avg(flips),
+        pct: total ? +((100 * avg(flips)) / total).toFixed(3) : 0,
+        active: prof.version === VERSION && prof.ecc === ECC
+      });
+    }
+    log("Grid measure", { steps: steps, profiles: results });
+    return results;
   }
 
   function cancelPrefetch() {
@@ -1194,6 +1278,14 @@
         tick();
         if (state.timer) clearInterval(state.timer);
         state.timer = setInterval(tick, 100);
+        // Non-blocking tuning aid: compare grid profiles a few seconds after boot.
+        if (state.api && state.decoder) {
+          setTimeout(function () {
+            measureGrid(state.api, 4).catch(function (err) {
+              log("Grid measure error", String(err && err.message ? err.message : err));
+            });
+          }, 4000);
+        }
       })
       .catch(function (err) {
         fail(err, "boot");

@@ -65,7 +65,7 @@ ${css}
         <dt>engine</dt><dd id="d-engine">—</dd>
         <dt>source</dt><dd id="d-source">—</dd>
         <dt>decoder</dt><dd id="d-decoder">—</dd>
-        <dt>ecc / ver</dt><dd id="d-opts">L / 3</dd>
+        <dt>ecc / ver</dt><dd id="d-opts">Q / 4</dd>
         <dt>render</dt><dd id="d-render">—</dd>
         <dt>interval</dt><dd id="d-interval">5 s</dd>
         <dt>balls</dt><dd id="d-balls">on</dd>
