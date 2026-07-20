@@ -1,9 +1,15 @@
 /**
- * Mask balls: R/G/B + C/M/Y/K billiard motion on two independent canvases.
- * - RGB group: additive blend (lighter) within the group only
- * - CMYK group: subtractive blend (multiply) within the group only
- * Groups do not color-mix with each other.
- * Direction changes ONLY on viewport-edge bounce.
+ * Mask balls: R/G/B + C/M/Y/K continuous billiard motion.
+ *
+ * Motion rules:
+ * - Always visible, never teleported / despawned while enabled
+ * - Direction changes ONLY on viewport-edge bounce (angle)
+ * - Speed may change linearly (acceleration) between bounces
+ *
+ * Color:
+ * - RGB group: additive (lighter) — separate canvas
+ * - CMYK group: subtractive (multiply) — separate canvas
+ * - Groups do not color-mix with each other
  */
 (function (global) {
   "use strict";
@@ -15,20 +21,21 @@
     { id: "C", group: "cmyk", hex: "#00ffff", rgb: [0, 255, 255] },
     { id: "M", group: "cmyk", hex: "#ff00ff", rgb: [255, 0, 255] },
     { id: "Y", group: "cmyk", hex: "#ffff00", rgb: [255, 255, 0] },
-    { id: "K", group: "cmyk", hex: "#000000", rgb: [0, 0, 0] }
+    { id: "K", group: "cmyk", hex: "#111111", rgb: [20, 20, 20] }
   ];
 
-  var BASE_SPEED = 260;
-  var SPEED_JITTER = 40;
-  /** Hold on target around the flip so every changed module stays fully masked. */
-  var COVER_LEAD_MS = 70;
-  var COVER_TRAIL_MS = 90;
-  var MIN_COVER_MS = COVER_LEAD_MS;
-  var MAX_COVER_MS = 160;
-  var AIM_LOOKAHEAD_BOUNCES = 3;
-  var MAX_BALL_R = 88;
-  var BASE_BALL_R = 30;
+  var BALL_R = 42;
+  var MIN_SPEED = 140;
+  var MAX_SPEED = 720;
+  var BASE_SPEED = 280;
+  var SPEED_JITTER = 50;
+  var MAX_ACCEL = 900; // px/s² — linear speed changes only
+  var COVER_LEAD_MS = 90;
+  var COVER_TRAIL_MS = 100;
+  var AIM_LOOKAHEAD_BOUNCES = 4;
   var MAX_TARGETS = 7;
+  /** Cluster disc must fit inside the ball so a centered hit fully covers modules. */
+  var MAX_TARGET_R = BALL_R - 4;
 
   function clamp(v, a, b) {
     return Math.max(a, Math.min(b, v));
@@ -109,6 +116,8 @@
     } else {
       this.stopLoop();
       this.events = [];
+      this.clearAssignments();
+      // Keep ball objects? Clear for clean disable — will respawn on enable.
       this.balls = [];
       if (this.rgbCtx && this.rgbCanvas) this.rgbCtx.clearRect(0, 0, this.rgbCanvas.width, this.rgbCanvas.height);
       if (this.cmykCtx && this.cmykCanvas) this.cmykCtx.clearRect(0, 0, this.cmykCanvas.width, this.cmykCanvas.height);
@@ -122,11 +131,10 @@
     for (var i = 0; i < BALL_COLORS.length; i++) {
       var c = BALL_COLORS[i];
       var speed = BASE_SPEED + (Math.random() * 2 - 1) * SPEED_JITTER;
-      var ang = (i / BALL_COLORS.length) * Math.PI * 2 + Math.random() * 0.5;
+      var ang = (i / BALL_COLORS.length) * Math.PI * 2 + Math.random() * 0.55;
       this.spawnBall(
-        40 + Math.random() * Math.max(1, w - 80),
-        40 + Math.random() * Math.max(1, h - 80),
-        30,
+        BALL_R + 20 + Math.random() * Math.max(1, w - BALL_R * 2 - 40),
+        BALL_R + 20 + Math.random() * Math.max(1, h - BALL_R * 2 - 40),
         c,
         Math.cos(ang) * speed,
         Math.sin(ang) * speed
@@ -134,9 +142,9 @@
     }
   };
 
-  MaskBalls.prototype.spawnBall = function (x, y, r, color, vx, vy) {
-    var speed = hypot(vx, vy) || BASE_SPEED;
-    var radius = r || BASE_BALL_R;
+  MaskBalls.prototype.spawnBall = function (x, y, color, vx, vy) {
+    var speed = clamp(hypot(vx, vy) || BASE_SPEED, MIN_SPEED, MAX_SPEED);
+    var ang = Math.atan2(vy, vx);
     var ball = {
       colorId: color.id,
       group: color.group,
@@ -144,15 +152,14 @@
       rgb: color.rgb.slice(),
       x: x,
       y: y,
-      vx: vx,
-      vy: vy,
+      vx: Math.cos(ang) * speed,
+      vy: Math.sin(ang) * speed,
       speed: speed,
-      r: radius,
-      baseR: radius,
+      targetSpeed: speed,
+      r: BALL_R,
       pendingAngle: null,
       queue: [],
-      covering: false,
-      held: false
+      covering: false
     };
     this.balls.push(ball);
     return ball;
@@ -161,11 +168,12 @@
   MaskBalls.prototype.playBounds = function (ball) {
     var w = window.innerWidth;
     var h = window.innerHeight;
+    var r = ball.r;
     return {
-      L: ball.r,
-      T: ball.r,
-      R: Math.max(ball.r + 1, w - ball.r),
-      B: Math.max(ball.r + 1, h - ball.r)
+      L: r,
+      T: r,
+      R: Math.max(r + 1, w - r),
+      B: Math.max(r + 1, h - r)
     };
   };
 
@@ -174,10 +182,8 @@
     var H = bounds.B - bounds.T;
     var x = px - bounds.L;
     var y = py - bounds.T;
-    var ax = Math.abs(nx);
-    var ay = Math.abs(ny);
-    var ux = (ax % 2 === 0) ? x : (W - x);
-    var uy = (ay % 2 === 0) ? y : (H - y);
+    var ux = (Math.abs(nx) % 2 === 0) ? x : (W - x);
+    var uy = (Math.abs(ny) % 2 === 0) ? y : (H - y);
     return {
       x: bounds.L + ux + nx * W,
       y: bounds.T + uy + ny * H
@@ -187,16 +193,12 @@
   MaskBalls.prototype.aimAngleFromBounce = function (bx, by, target, travelDist, ball) {
     var bounds = this.playBounds(ball);
     var best = null;
-    var bestErr = Infinity;
-    var bestRaw = Infinity;
+    var bestScore = Infinity;
     for (var nx = -AIM_LOOKAHEAD_BOUNCES; nx <= AIM_LOOKAHEAD_BOUNCES; nx++) {
       for (var ny = -AIM_LOOKAHEAD_BOUNCES; ny <= AIM_LOOKAHEAD_BOUNCES; ny++) {
-        var imgX;
-        var imgY;
-        if (nx === 0 && ny === 0) {
-          imgX = target.x;
-          imgY = target.y;
-        } else {
+        var imgX = target.x;
+        var imgY = target.y;
+        if (nx !== 0 || ny !== 0) {
           var img = this.unfoldPoint(target.x, target.y, nx, ny, bounds);
           imgX = img.x;
           imgY = img.y;
@@ -204,23 +206,22 @@
         var d = hypot(imgX - bx, imgY - by);
         if (d <= 1) continue;
         var raw = Math.abs(d - travelDist);
-        var err = raw + (Math.abs(nx) + Math.abs(ny)) * 4;
-        if (err < bestErr) {
-          bestErr = err;
-          bestRaw = raw;
-          best = Math.atan2(imgY - by, imgX - bx);
+        var score = raw + (Math.abs(nx) + Math.abs(ny)) * 3;
+        if (score < bestScore) {
+          bestScore = score;
+          best = { ang: Math.atan2(imgY - by, imgX - bx), dist: d, raw: raw };
         }
       }
     }
-    if (best == null) return null;
-    var slack = Math.max(ball.r * 2.8, travelDist * 0.28, 70);
-    if (bestRaw > slack) return null;
+    if (!best) return null;
+    var slack = Math.max(BALL_R * 1.2, travelDist * 0.22, 50);
+    if (best.raw > slack) return null;
     return best;
   };
 
   /**
-   * Build cover targets that geometrically contain EVERY changed module.
-   * Greedy packing into ≤ MAX_TARGETS discs; leftovers expand nearest disc.
+   * Cover targets: every changed module inside some disc with r <= MAX_TARGET_R
+   * so a ball of radius BALL_R centered on the disc fully occludes it.
    */
   MaskBalls.prototype.clusterDiffs = function (moduleDiffs, meta, qr) {
     var size = meta.moduleSize;
@@ -228,7 +229,7 @@
     var n = size + margin * 2;
     var cellW = qr.width / n;
     var cellH = qr.height / n;
-    var pad = Math.max(cellW, cellH) * 0.55 + 2;
+    var pad = Math.max(cellW, cellH) * 0.5 + 1.5;
 
     function cellCenter(row, col) {
       return {
@@ -239,7 +240,6 @@
       };
     }
 
-    /** Smallest CSS circle covering the given module cells (center + corners). */
     function coverCircle(cells) {
       if (!cells.length) return null;
       var minR = cells[0].row;
@@ -282,13 +282,12 @@
     var targets = [];
 
     while (uncovered.length && targets.length < MAX_TARGETS) {
-      // Seed: densest neighborhood
       var bestSeed = 0;
       var bestNeigh = -1;
       for (i = 0; i < uncovered.length; i++) {
         var neigh = 0;
         for (var j = 0; j < uncovered.length; j++) {
-          if (hypot(uncovered[i].x - uncovered[j].x, uncovered[i].y - uncovered[j].y) < MAX_BALL_R * 0.85) {
+          if (hypot(uncovered[i].x - uncovered[j].x, uncovered[i].y - uncovered[j].y) < MAX_TARGET_R) {
             neigh++;
           }
         }
@@ -305,17 +304,11 @@
         grew = false;
         var circ = coverCircle(cluster);
         var pick = -1;
-        var pickCirc = null;
         for (j = 0; j < uncovered.length; j++) {
-          var trial = cluster.concat([uncovered[j]]);
-          var tc = coverCircle(trial);
-          if (tc.r <= MAX_BALL_R && (!pickCirc || tc.r < pickCirc.r)) {
-            // Prefer points close to current center
-            var d = hypot(uncovered[j].x - circ.x, uncovered[j].y - circ.y);
-            if (d <= MAX_BALL_R) {
-              pick = j;
-              pickCirc = tc;
-            }
+          var trial = coverCircle(cluster.concat([uncovered[j]]));
+          if (trial.r <= MAX_TARGET_R) {
+            pick = j;
+            break;
           }
         }
         if (pick >= 0) {
@@ -328,50 +321,60 @@
       targets.push({
         x: final.x,
         y: final.y,
-        r: Math.min(MAX_BALL_R, Math.max(BASE_BALL_R, final.r)),
+        r: Math.min(MAX_TARGET_R, Math.max(10, final.r)),
         count: final.count,
         cells: final.cells,
-        assigned: null,
-        covered: false
+        assigned: null
       });
-      // If clamping r shrank below geometric need, keep true r (must fully cover)
-      if (final.r > targets[targets.length - 1].r) {
-        targets[targets.length - 1].r = final.r;
-      }
     }
 
-    // Absorb leftovers into nearest target (expand radius — full cover required)
+    // Leftovers → new micro-targets (one cell) displacing farthest/smallest if at cap
     while (uncovered.length) {
       var p = uncovered.pop();
-      var nearest = 0;
-      var nearestD = Infinity;
-      for (i = 0; i < targets.length; i++) {
-        var dd = hypot(p.x - targets[i].x, p.y - targets[i].y);
-        if (dd < nearestD) {
-          nearestD = dd;
-          nearest = i;
-        }
-      }
-      if (!targets.length) {
-        var solo = coverCircle([p]);
+      var solo = coverCircle([p]);
+      if (targets.length < MAX_TARGETS) {
         targets.push({
           x: solo.x,
           y: solo.y,
-          r: solo.r,
+          r: Math.min(MAX_TARGET_R, solo.r),
           count: 1,
           cells: solo.cells,
-          assigned: null,
-          covered: false
+          assigned: null
         });
       } else {
-        var t = targets[nearest];
-        var cells = (t.cells || []).concat([p]);
-        var rebuilt = coverCircle(cells);
-        t.x = rebuilt.x;
-        t.y = rebuilt.y;
-        t.r = rebuilt.r;
-        t.count = rebuilt.count;
-        t.cells = rebuilt.cells;
+        // Merge into nearest target only if still within MAX_TARGET_R; else replace smallest
+        var nearest = 0;
+        var nearestD = Infinity;
+        for (i = 0; i < targets.length; i++) {
+          var dd = hypot(p.x - targets[i].x, p.y - targets[i].y);
+          if (dd < nearestD) {
+            nearestD = dd;
+            nearest = i;
+          }
+        }
+        var mergedCells = (targets[nearest].cells || []).concat([p]);
+        var rebuilt = coverCircle(mergedCells);
+        if (rebuilt.r <= MAX_TARGET_R) {
+          targets[nearest].x = rebuilt.x;
+          targets[nearest].y = rebuilt.y;
+          targets[nearest].r = rebuilt.r;
+          targets[nearest].count = rebuilt.count;
+          targets[nearest].cells = rebuilt.cells;
+        } else {
+          // Replace the target with fewest cells
+          var weak = 0;
+          for (i = 1; i < targets.length; i++) {
+            if (targets[i].count < targets[weak].count) weak = i;
+          }
+          targets[weak] = {
+            x: solo.x,
+            y: solo.y,
+            r: Math.min(MAX_TARGET_R, solo.r),
+            count: 1,
+            cells: solo.cells,
+            assigned: null
+          };
+        }
       }
     }
 
@@ -383,17 +386,17 @@
     this.intervalMs = (meta && meta.intervalMs) || this.intervalMs || 1000;
     var qr = this.getQrRect();
     this.qrRect = qr;
+    if (!this.balls.length) this.spawnPalette();
+
     if (!qr || !events || !events.length) {
       this.events = [];
       this.clearAssignments();
       return;
     }
 
-    if (!this.balls.length) this.spawnPalette();
-
-    var coverMs = clamp(this.intervalMs * 0.08, MIN_COVER_MS, MAX_COVER_MS);
-    var leadMs = Math.min(COVER_LEAD_MS, coverMs);
-    var trailMs = Math.min(COVER_TRAIL_MS, Math.max(60, coverMs * 0.55));
+    var coverMs = clamp(this.intervalMs * 0.1, COVER_LEAD_MS, 220);
+    var leadMs = COVER_LEAD_MS;
+    var trailMs = COVER_TRAIL_MS;
     var now = Date.now();
     var built = [];
     for (var i = 0; i < events.length; i++) {
@@ -412,15 +415,12 @@
       });
     }
     this.events = built;
-    for (i = 0; i < this.balls.length; i++) {
-      this.balls[i].pendingAngle = null;
-    }
     this.assignAndAim(now);
     this.onLog("Mask forecast", {
       events: built.length,
       targets: built.reduce(function (n, e) { return n + e.targets.length; }, 0),
       coverMs: Math.round(coverMs),
-      horizon: built.length ? Math.round((built[built.length - 1].changeAtMs - now) / 1000) + "s" : "0"
+      balls: this.balls.length
     });
     this.startLoop();
   };
@@ -440,6 +440,7 @@
       this.balls[i].queue = [];
       this.balls[i].pendingAngle = null;
       this.balls[i].covering = false;
+      this.balls[i].targetSpeed = clamp(this.balls[i].speed, MIN_SPEED, MAX_SPEED);
     }
   };
 
@@ -497,38 +498,38 @@
     };
   };
 
-  MaskBalls.prototype.trajectoryCovers = function (ball, target, changeAtMs, coverMs, now) {
+  /** True if current heading (with specular bounces) passes near target around tHit. */
+  MaskBalls.prototype.trajectoryCovers = function (ball, target, changeAtMs, now) {
     var tHit = (changeAtMs - now) / 1000;
-    if (tHit < 0 || tHit > 12) return false;
-    var sim = {
-      x: ball.x,
-      y: ball.y,
-      vx: ball.vx,
-      vy: ball.vy,
-      r: ball.r,
-      speed: ball.speed
-    };
+    if (tHit < 0.02 || tHit > 14) return false;
+    var sim = { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy, r: ball.r, speed: ball.speed };
     var elapsed = 0;
     var steps = 0;
-    while (elapsed < tHit + coverMs / 1000 && steps < 40) {
-      var remain = tHit + coverMs / 1000 - elapsed;
+    var tol = Math.max(6, BALL_R - target.r);
+    while (elapsed < tHit + 0.05 && steps < 48) {
+      var remain = tHit - elapsed;
+      if (remain < 0) break;
       var nb = this.nextBounce(sim, remain + 1e-4);
       var dt = nb ? Math.min(nb.t, remain) : remain;
-      var dx = sim.vx * dt;
-      var dy = sim.vy * dt;
+      var x1 = sim.x + sim.vx * dt;
+      var y1 = sim.y + sim.vy * dt;
+      var dx = x1 - sim.x;
+      var dy = y1 - sim.y;
       var len2 = dx * dx + dy * dy;
       if (len2 >= 1e-8) {
         var u = clamp(((target.x - sim.x) * dx + (target.y - sim.y) * dy) / len2, 0, 1);
         var cx = sim.x + u * dx;
         var cy = sim.y + u * dy;
-        var closestDist = hypot(cx - target.x, cy - target.y);
         var tSeg = elapsed + u * dt;
-        if (closestDist <= ball.r + target.r * 0.35 &&
-            Math.abs(tSeg - tHit) <= (coverMs / 1000) * 0.9) {
+        if (hypot(cx - target.x, cy - target.y) <= tol && Math.abs(tSeg - tHit) <= 0.08) {
           return true;
         }
       }
-      if (!nb || dt < nb.t - 1e-6) break;
+      if (!nb || dt < nb.t - 1e-6) {
+        // End of segment at tHit
+        if (hypot(x1 - target.x, y1 - target.y) <= tol) return true;
+        break;
+      }
       sim.x = nb.x;
       sim.y = nb.y;
       elapsed += nb.t;
@@ -539,93 +540,129 @@
     return false;
   };
 
-  MaskBalls.prototype.ballFreeFor = function (ball, changeAtMs, coverMs) {
+  /**
+   * Plan intercept using ONLY:
+   * - linear targetSpeed along current heading (if on-track), and/or
+   * - pendingAngle at next bounce + targetSpeed for post-bounce travel
+   */
+  MaskBalls.prototype.planIntercept = function (ball, target, changeAtMs, now) {
+    var tHit = (changeAtMs - now) / 1000;
+    if (tHit < 0.05) return null;
+
+    var sp = hypot(ball.vx, ball.vy) || ball.speed;
+    var ux = ball.vx / sp;
+    var uy = ball.vy / sp;
+    var toX = target.x - ball.x;
+    var toY = target.y - ball.y;
+    var along = toX * ux + toY * uy;
+    var perpX = toX - along * ux;
+    var perpY = toY - along * uy;
+    var perp = hypot(perpX, perpY);
+    var tol = Math.max(5, BALL_R - target.r);
+
+    // On current ray: only speed change needed
+    if (along > 8 && perp <= tol) {
+      var needSpeed = along / tHit;
+      if (needSpeed >= MIN_SPEED * 0.85 && needSpeed <= MAX_SPEED * 1.05) {
+        return {
+          pendingAngle: null,
+          targetSpeed: clamp(needSpeed, MIN_SPEED, MAX_SPEED),
+          score: perp + Math.abs(needSpeed - sp) * 0.05
+        };
+      }
+    }
+
+    var nb = this.nextBounce(ball, tHit);
+    if (!nb) return null;
+    var tAfter = tHit - nb.t;
+    if (tAfter < 0.04) return null;
+
+    // Try several speeds after bounce for best timed path length
+    var candidates = [];
+    var speeds = [
+      clamp(sp, MIN_SPEED, MAX_SPEED),
+      clamp(along > 0 ? along / tHit : sp, MIN_SPEED, MAX_SPEED),
+      MIN_SPEED,
+      (MIN_SPEED + MAX_SPEED) / 2,
+      MAX_SPEED
+    ];
+    for (var si = 0; si < speeds.length; si++) {
+      var travel = speeds[si] * tAfter;
+      var aim = this.aimAngleFromBounce(nb.x, nb.y, target, travel, ball);
+      if (!aim) continue;
+      candidates.push({
+        pendingAngle: aim.ang,
+        targetSpeed: clamp(speeds[si], MIN_SPEED, MAX_SPEED),
+        // Prefer arriving with exact path length; earlier bounce is fine
+        score: aim.raw + nb.t * 40
+      });
+    }
+    if (!candidates.length) {
+      // Best-effort: aim toward target from bounce, speed from distance
+      var direct = hypot(target.x - nb.x, target.y - nb.y);
+      candidates.push({
+        pendingAngle: Math.atan2(target.y - nb.y, target.x - nb.x),
+        targetSpeed: clamp(direct / tAfter, MIN_SPEED, MAX_SPEED),
+        score: 800 + direct * 0.2
+      });
+    }
+    candidates.sort(function (a, b) { return a.score - b.score; });
+    return candidates[0];
+  };
+
+  MaskBalls.prototype.ballFreeFor = function (ball, changeAtMs, leadMs, trailMs) {
     var q = ball.queue || [];
+    var win = (leadMs || COVER_LEAD_MS) + (trailMs || COVER_TRAIL_MS) + 40;
     for (var i = 0; i < q.length; i++) {
-      var a = q[i];
-      if (Math.abs(a.changeAtMs - changeAtMs) < (a.coverMs + coverMs + 80)) return false;
+      if (Math.abs(q[i].changeAtMs - changeAtMs) < win) return false;
     }
     return true;
   };
 
   MaskBalls.prototype.assignAndAim = function (now) {
+    // Preserve continuous flight: only rewrite queues / aim / targetSpeed — never x,y,r
     for (var i = 0; i < this.balls.length; i++) {
       this.balls[i].queue = [];
       this.balls[i].covering = false;
     }
-    var aimForBall = {};
+
+    var planFor = {};
 
     for (var ei = 0; ei < this.events.length; ei++) {
       var ev = this.events[ei];
       for (var ti = 0; ti < ev.targets.length; ti++) {
         var target = ev.targets[ti];
         var chosen = null;
+        var chosenPlan = null;
         var chosenScore = Infinity;
-        var chosenAng = null;
-        var bi;
-        var ball;
-        var score;
-        var tAvail;
-        var nb;
-        var travel;
-        var ang;
 
-        for (bi = 0; bi < this.balls.length; bi++) {
-          ball = this.balls[bi];
-          if (!this.ballFreeFor(ball, ev.changeAtMs, ev.coverMs)) continue;
-          if (this.trajectoryCovers(ball, target, ev.changeAtMs, ev.coverMs, now)) {
-            score = Math.abs(ev.changeAtMs - now);
-            if (score < chosenScore) {
-              chosenScore = score;
-              chosen = bi;
-              chosenAng = null;
-            }
+        for (var bi = 0; bi < this.balls.length; bi++) {
+          var ball = this.balls[bi];
+          if (!this.ballFreeFor(ball, ev.changeAtMs, ev.leadMs, ev.trailMs)) continue;
+
+          var plan = null;
+          var score;
+          if (this.trajectoryCovers(ball, target, ev.changeAtMs, now)) {
+            // Already on a covering path — only tune speed
+            plan = this.planIntercept(ball, target, ev.changeAtMs, now) || {
+              pendingAngle: null,
+              targetSpeed: ball.speed,
+              score: 0
+            };
+            score = plan.score;
+          } else {
+            plan = this.planIntercept(ball, target, ev.changeAtMs, now);
+            if (!plan) continue;
+            score = plan.score + 20;
+          }
+          if (score < chosenScore) {
+            chosenScore = score;
+            chosen = bi;
+            chosenPlan = plan;
           }
         }
 
-        if (chosen == null) {
-          for (bi = 0; bi < this.balls.length; bi++) {
-            ball = this.balls[bi];
-            if (!this.ballFreeFor(ball, ev.changeAtMs, ev.coverMs)) continue;
-            tAvail = (ev.changeAtMs - now) / 1000;
-            if (tAvail < 0.05) continue;
-            nb = this.nextBounce(ball, tAvail);
-            if (!nb) continue;
-            travel = ball.speed * Math.max(0.04, tAvail - nb.t);
-            ang = this.aimAngleFromBounce(nb.x, nb.y, target, travel, ball);
-            if (ang == null) continue;
-            score = nb.t * 1000 + Math.abs(travel - hypot(target.x - nb.x, target.y - nb.y));
-            if (score < chosenScore) {
-              chosenScore = score;
-              chosen = bi;
-              chosenAng = ang;
-            }
-          }
-        }
-
-        if (chosen == null) {
-          for (bi = 0; bi < this.balls.length; bi++) {
-            ball = this.balls[bi];
-            if (!this.ballFreeFor(ball, ev.changeAtMs, ev.coverMs)) continue;
-            tAvail = (ev.changeAtMs - now) / 1000;
-            nb = this.nextBounce(ball, Math.max(tAvail, 2.5));
-            if (!nb) continue;
-            travel = ball.speed * Math.max(0.04, Math.max(0.05, tAvail - nb.t));
-            ang = this.aimAngleFromBounce(nb.x, nb.y, target, travel, ball);
-            score = hypot(ball.x - target.x, ball.y - target.y) + nb.t * 200;
-            if (ang == null) {
-              ang = Math.atan2(target.y - nb.y, target.x - nb.x);
-              score += 500;
-            }
-            if (score < chosenScore) {
-              chosenScore = score;
-              chosen = bi;
-              chosenAng = ang;
-            }
-          }
-        }
-
-        if (chosen != null) {
+        if (chosen != null && chosenPlan) {
           ball = this.balls[chosen];
           target.assigned = ball.colorId;
           var job = {
@@ -639,10 +676,8 @@
             slot: ev.slot
           };
           ball.queue.push(job);
-          // Size ball to fully cover its target disc
-          ball.r = Math.max(ball.baseR || BASE_BALL_R, target.r);
-          if (aimForBall[chosen] == null || job.changeAtMs < aimForBall[chosen].changeAtMs) {
-            aimForBall[chosen] = { job: job, ang: chosenAng };
+          if (planFor[chosen] == null || job.changeAtMs < planFor[chosen].job.changeAtMs) {
+            planFor[chosen] = { job: job, plan: chosenPlan };
           }
         }
       }
@@ -651,23 +686,39 @@
     for (bi = 0; bi < this.balls.length; bi++) {
       ball = this.balls[bi];
       ball.queue.sort(function (a, b) { return a.changeAtMs - b.changeAtMs; });
-      var aim = aimForBall[bi];
-      if (!aim) {
-        ball.pendingAngle = null;
+      var pf = planFor[bi];
+      if (!pf) {
+        // Cruise at comfortable speed when idle
+        if (!ball.queue.length) {
+          ball.targetSpeed = clamp(BASE_SPEED + (Math.random() * 2 - 1) * 30, MIN_SPEED, MAX_SPEED);
+        }
         continue;
       }
-      if (aim.ang != null) {
-        ball.pendingAngle = aim.ang;
-      } else {
-        tAvail = (aim.job.changeAtMs - now) / 1000;
-        nb = this.nextBounce(ball, tAvail);
-        if (nb) {
-          travel = ball.speed * Math.max(0.04, tAvail - nb.t);
-          ang = this.aimAngleFromBounce(nb.x, nb.y, aim.job, travel, ball);
-          ball.pendingAngle = ang;
-        }
+      ball.targetSpeed = pf.plan.targetSpeed;
+      // Angle applied only at the next wall bounce
+      if (pf.plan.pendingAngle != null) {
+        ball.pendingAngle = pf.plan.pendingAngle;
       }
     }
+  };
+
+  /** Linear speed change toward targetSpeed; direction unchanged. */
+  MaskBalls.prototype.applySpeed = function (ball, dt) {
+    var cur = hypot(ball.vx, ball.vy) || ball.speed;
+    var target = clamp(ball.targetSpeed || cur, MIN_SPEED, MAX_SPEED);
+    var maxStep = MAX_ACCEL * dt;
+    var next = cur;
+    if (target > cur) next = Math.min(target, cur + maxStep);
+    else if (target < cur) next = Math.max(target, cur - maxStep);
+    if (cur < 1e-4) {
+      var ang = ball.pendingAngle != null ? ball.pendingAngle : Math.random() * Math.PI * 2;
+      ball.vx = Math.cos(ang) * next;
+      ball.vy = Math.sin(ang) * next;
+    } else {
+      ball.vx = (ball.vx / cur) * next;
+      ball.vy = (ball.vy / cur) * next;
+    }
+    ball.speed = next;
   };
 
   MaskBalls.prototype.integrate = function (ball, dt) {
@@ -692,12 +743,9 @@
         ball.vx = Math.cos(ang) * ball.speed;
         ball.vy = Math.sin(ang) * ball.speed;
       } else {
-        if (nb.wall.indexOf("L") >= 0 || nb.wall.indexOf("R") >= 0) {
-          ball.vx = -ball.vx;
-        }
-        if (nb.wall.indexOf("T") >= 0 || nb.wall.indexOf("B") >= 0) {
-          ball.vy = -ball.vy;
-        }
+        // Specular reflection — angle change only at edge
+        if (nb.wall.indexOf("L") >= 0 || nb.wall.indexOf("R") >= 0) ball.vx = -ball.vx;
+        if (nb.wall.indexOf("T") >= 0 || nb.wall.indexOf("B") >= 0) ball.vy = -ball.vy;
       }
       var sp = hypot(ball.vx, ball.vy) || ball.speed;
       ball.vx = (ball.vx / sp) * ball.speed;
@@ -712,20 +760,20 @@
     var x = ball.x * scale;
     var y = ball.y * scale;
     var col = ball.rgb;
-    var alpha = ball.covering ? 1 : 0.92;
+    var alpha = ball.covering ? 1 : 0.94;
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.closePath();
     ctx.fillStyle = "rgba(" + col[0] + "," + col[1] + "," + col[2] + "," + alpha + ")";
     ctx.fill();
-    if (ball.covering) {
-      ctx.lineWidth = 2 * scale;
-      ctx.strokeStyle = "rgba(255,255,255,0.55)";
-      ctx.stroke();
-    }
+    // Outline so K (near-black) stays visible on black background
+    ctx.lineWidth = (ball.covering ? 2.5 : 1.5) * scale;
+    ctx.strokeStyle = ball.covering
+      ? "rgba(255,255,255,0.7)"
+      : "rgba(255,255,255,0.28)";
+    ctx.stroke();
   };
 
-  /** Paint RGB (additive) and CMYK (subtractive) on separate canvases — no cross-group mix. */
   MaskBalls.prototype.paint = function () {
     if (!this.rgbCtx || !this.cmykCtx) return;
     var w = this.rgbCanvas.width;
@@ -738,7 +786,6 @@
       else cmykBalls.push(this.balls[i]);
     }
 
-    // RGB — additive (lighter)
     var ctx = this.rgbCtx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
@@ -746,7 +793,6 @@
     for (i = 0; i < rgbBalls.length; i++) this.drawBall(ctx, rgbBalls[i], scale);
     ctx.globalCompositeOperation = "source-over";
 
-    // CMYK — subtractive (multiply on white), then keep only ball union alpha
     ctx = this.cmykCtx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
@@ -765,21 +811,16 @@
         ctx.fill();
       }
       ctx.globalCompositeOperation = "source-over";
-    }
-  };
-
-  MaskBalls.prototype.activeHoldJob = function (ball, now) {
-    var q = ball.queue || [];
-    var best = null;
-    for (var qi = 0; qi < q.length; qi++) {
-      var a = q[qi];
-      var lead = a.leadMs != null ? a.leadMs : COVER_LEAD_MS;
-      var trail = a.trailMs != null ? a.trailMs : COVER_TRAIL_MS;
-      if (now >= a.changeAtMs - lead && now <= a.changeAtMs + trail) {
-        if (!best || a.changeAtMs < best.changeAtMs) best = a;
+      // Re-stroke outlines after multiply (visibility of C/M/Y/K)
+      for (i = 0; i < cmykBalls.length; i++) {
+        b = cmykBalls[i];
+        ctx.beginPath();
+        ctx.arc(b.x * scale, b.y * scale, b.r * scale, 0, Math.PI * 2);
+        ctx.lineWidth = (b.covering ? 2.5 : 1.5) * scale;
+        ctx.strokeStyle = b.covering ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.35)";
+        ctx.stroke();
       }
     }
-    return best;
   };
 
   MaskBalls.prototype.tick = function (ts) {
@@ -795,31 +836,27 @@
       this.resizeCanvases();
     }
 
+    // Always keep full palette alive
+    if (this.balls.length < BALL_COLORS.length) this.spawnPalette();
+
     for (var i = 0; i < this.balls.length; i++) {
       var ball = this.balls[i];
-      var hold = this.activeHoldJob(ball, now);
+      this.applySpeed(ball, dt);
+      this.integrate(ball, dt);
 
-      if (hold) {
-        // Hard lock on the cover disc through the flip — full module occlusion
-        ball.held = true;
-        ball.covering = true;
-        ball.x = hold.x;
-        ball.y = hold.y;
-        ball.r = Math.max(ball.r, hold.r);
-        // Keep speed vector for resume; do not integrate while held
-      } else {
-        if (ball.held) {
-          ball.held = false;
-          // Resume billiard; shrink back toward base after cover
-          ball.r = ball.baseR || BASE_BALL_R;
-          var ang = Math.atan2(ball.vy, ball.vx);
-          if (!isFinite(ang)) ang = Math.random() * Math.PI * 2;
-          ball.vx = Math.cos(ang) * ball.speed;
-          ball.vy = Math.sin(ang) * ball.speed;
-        }
-        this.integrate(ball, dt);
-        ball.covering = false;
+      var covering = false;
+      var q = ball.queue || [];
+      for (var qi = 0; qi < q.length; qi++) {
+        var a = q[qi];
+        var lead = a.leadMs != null ? a.leadMs : COVER_LEAD_MS;
+        var trail = a.trailMs != null ? a.trailMs : COVER_TRAIL_MS;
+        if (now < a.changeAtMs - lead || now > a.changeAtMs + trail) continue;
+        // Full cover: target disc must lie inside the ball
+        var need = a.r;
+        var dist = hypot(ball.x - a.x, ball.y - a.y);
+        if (dist + need <= ball.r + 1.5) covering = true;
       }
+      ball.covering = covering;
     }
 
     this.paint();
@@ -846,6 +883,7 @@
   };
 
   MaskBalls.COLORS = BALL_COLORS;
+  MaskBalls.BALL_R = BALL_R;
 
   global.MaskBalls = MaskBalls;
 })(typeof window !== "undefined" ? window : globalThis);
