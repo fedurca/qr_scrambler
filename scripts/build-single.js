@@ -47,7 +47,11 @@ ${css}
     <label>
       Maskování
       <select id="mask-method">
-        <option value="snow" selected>Sněžení</option>
+        <option value="snow3" selected>Změny + sníh</option>
+        <option value="snow1">Jen změny</option>
+        <option value="snow2">Změny + šum</option>
+        <option value="snow4">Změny + roj</option>
+        <option value="snow5">Změny + sken</option>
         <option value="none">Žádné</option>
       </select>
     </label>
@@ -74,7 +78,7 @@ ${css}
         <dt>ecc / ver</dt><dd id="d-opts">H / 4</dd>
         <dt>render</dt><dd id="d-render">—</dd>
         <dt>interval</dt><dd id="d-interval">1 s</dd>
-        <dt>mask</dt><dd id="d-mask">snow</dd>
+        <dt>mask</dt><dd id="d-mask">snow3</dd>
         <dt>forecast</dt><dd id="d-forecast">—</dd>
         <dt>ball pos</dt><dd id="d-ballpos">—</dd>
         <dt>last flip</dt><dd id="d-flip">—</dd>

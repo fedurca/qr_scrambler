@@ -97,7 +97,7 @@
     epochIntervalSec: 1,
     maskBalls: null,
     maskFx: null,
-    maskMethod: "snow",
+    maskMethod: "snow3",
     pendingDiffs: null,
     forecastHorizon: 8,
     lastPlanSnap: null
@@ -1460,6 +1460,9 @@
       state.maskFx = new MaskFx({
         getQrRect: getQrContentRect,
         getQrInfo: getQrInfo,
+        // Cells (module [row,col]) that will flip in the upcoming iteration — the
+        // snow variants pre-blink these so the real change blends into the flicker.
+        getChangingCells: function () { return state.pendingDiffs || []; },
         onLog: function (msg, detail) { log(msg, detail); }
       });
     }
