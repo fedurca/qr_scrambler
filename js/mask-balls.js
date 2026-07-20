@@ -5,11 +5,14 @@
  * - Always visible, never teleported / despawned while enabled
  * - Direction changes ONLY on viewport-edge bounce (angle)
  * - Speed may change linearly (acceleration) between bounces
+ * - Ball radius is CONSTANT (BALL_R) — never grows/shrinks
  *
  * Color:
  * - RGB group: additive (lighter) — separate canvas
  * - CMYK group: subtractive (multiply) — separate canvas
  * - Groups do not color-mix with each other
+ *
+ * Cover: intercept change discs, brief hold at flip, then evacuate QR.
  */
 (function (global) {
   "use strict";
@@ -24,7 +27,8 @@
     { id: "K", group: "cmyk", hex: "#3a3a3a", rgb: [58, 58, 58] }
   ];
 
-  var BALL_R = 58;
+  /** Fixed visual + physical radius for every ball (never mutated). */
+  var BALL_R = 52;
   var MIN_SPEED = 160;
   var MAX_SPEED = 980;
   var BASE_SPEED = 320;
@@ -170,10 +174,16 @@
     return ball;
   };
 
+  /** Always the constant radius — ignore any accidental mutation. */
+  MaskBalls.prototype.ballRadius = function (ball) {
+    if (ball && ball.r !== BALL_R) ball.r = BALL_R;
+    return BALL_R;
+  };
+
   MaskBalls.prototype.playBounds = function (ball) {
     var w = window.innerWidth;
     var h = window.innerHeight;
-    var r = ball.r;
+    var r = this.ballRadius(ball);
     return {
       L: r,
       T: r,
@@ -482,11 +492,12 @@
   MaskBalls.prototype.overlapsQr = function (ball, qr, pad) {
     if (!qr) return false;
     var p = pad != null ? pad : QR_CLEAR_PAD;
+    var r = this.ballRadius(ball);
     return (
-      ball.x + ball.r > qr.left - p &&
-      ball.x - ball.r < qr.left + qr.width + p &&
-      ball.y + ball.r > qr.top - p &&
-      ball.y - ball.r < qr.top + qr.height + p
+      ball.x + r > qr.left - p &&
+      ball.x - r < qr.left + qr.width + p &&
+      ball.y + r > qr.top - p &&
+      ball.y - r < qr.top + qr.height + p
     );
   };
 
@@ -515,6 +526,7 @@
    */
   MaskBalls.prototype.evacuateFromQr = function (ball) {
     var qr = this.getQrRect() || this.qrRect;
+    var r = this.ballRadius(ball);
     if (!qr || !this.overlapsQr(ball, qr, QR_CLEAR_PAD)) {
       ball.evacuating = false;
       if (!ball.queue || !ball.queue.length) {
@@ -534,17 +546,17 @@
     var cx = qr.left + qr.width / 2;
     var cy = qr.top + qr.height / 2;
     var edges = [
-      { x: ball.r + 6, y: clamp(ball.y, ball.r + 6, h - ball.r - 6) },
-      { x: w - ball.r - 6, y: clamp(ball.y, ball.r + 6, h - ball.r - 6) },
-      { x: clamp(ball.x, ball.r + 6, w - ball.r - 6), y: ball.r + 6 },
-      { x: clamp(ball.x, ball.r + 6, w - ball.r - 6), y: h - ball.r - 6 }
+      { x: r + 6, y: clamp(ball.y, r + 6, h - r - 6) },
+      { x: w - r - 6, y: clamp(ball.y, r + 6, h - r - 6) },
+      { x: clamp(ball.x, r + 6, w - r - 6), y: r + 6 },
+      { x: clamp(ball.x, r + 6, w - r - 6), y: h - r - 6 }
     ];
     // Prefer edge points far from QR center (clear of the code)
     var best = edges[0];
     var bestScore = -Infinity;
     for (var i = 0; i < edges.length; i++) {
       var e = edges[i];
-      var ghost = { x: e.x, y: e.y, r: ball.r };
+      var ghost = { x: e.x, y: e.y, r: r };
       var clear = !this.overlapsQr(ghost, qr, QR_CLEAR_PAD + 10);
       var score = hypot(e.x - cx, e.y - cy) + (clear ? 400 : 0) - hypot(e.x - ball.x, e.y - ball.y) * 0.25;
       if (score > bestScore) {
@@ -558,7 +570,7 @@
       y: ball.y,
       vx: ball.vx,
       vy: ball.vy,
-      r: ball.r,
+      r: r,
       speed: ball.speed
     };
     var nb = this.nextBounce(probe, 10);
@@ -788,7 +800,7 @@
     // Cover imminent: intercept target. Once on disc after changeAt → evacuate.
     if (now >= job.changeAtMs) {
       var dist = hypot(ball.x - job.x, ball.y - job.y);
-      if (dist + job.r <= ball.r + 1 || now >= job.changeAtMs + (job.trailMs || COVER_TRAIL_MS)) {
+      if (dist + job.r <= BALL_R + 1 || now >= job.changeAtMs + (job.trailMs || COVER_TRAIL_MS)) {
         ball.needEvacuate = true;
         this.evacuateFromQr(ball);
         return;
@@ -959,7 +971,7 @@
   };
 
   MaskBalls.prototype.drawBallRgb = function (ctx, ball, scale) {
-    var r = ball.r * scale;
+    var r = this.ballRadius(ball) * scale;
     var x = ball.x * scale;
     var y = ball.y * scale;
     var col = ball.rgb;
@@ -968,8 +980,9 @@
     ctx.closePath();
     ctx.fillStyle = "rgb(" + col[0] + "," + col[1] + "," + col[2] + ")";
     ctx.fill();
-    ctx.lineWidth = (ball.covering ? 2.5 : 1.5) * scale;
-    ctx.strokeStyle = ball.covering ? "rgba(255,255,255,0.75)" : "rgba(255,255,255,0.3)";
+    // Fixed stroke width — must not change perceived ball size when covering
+    ctx.lineWidth = 1.75 * scale;
+    ctx.strokeStyle = ball.covering ? "rgba(255,255,255,0.65)" : "rgba(255,255,255,0.3)";
     ctx.stroke();
   };
 
@@ -1000,10 +1013,12 @@
     off.fillRect(0, 0, w, h);
     off.globalCompositeOperation = "multiply";
     var i;
+    var rPx = BALL_R * scale;
     for (i = 0; i < balls.length; i++) {
       var b = balls[i];
+      this.ballRadius(b);
       off.beginPath();
-      off.arc(b.x * scale, b.y * scale, b.r * scale, 0, Math.PI * 2);
+      off.arc(b.x * scale, b.y * scale, rPx, 0, Math.PI * 2);
       off.closePath();
       off.fillStyle = "rgb(" + b.rgb[0] + "," + b.rgb[1] + "," + b.rgb[2] + ")";
       off.fill();
@@ -1016,7 +1031,7 @@
     var maxY = 0;
     for (i = 0; i < balls.length; i++) {
       b = balls[i];
-      var rr = b.r * scale + 2;
+      var rr = rPx + 2;
       minX = Math.min(minX, b.x * scale - rr);
       minY = Math.min(minY, b.y * scale - rr);
       maxX = Math.max(maxX, b.x * scale + rr);
@@ -1042,8 +1057,8 @@
     off.beginPath();
     for (i = 0; i < balls.length; i++) {
       b = balls[i];
-      off.moveTo(b.x * scale + b.r * scale, b.y * scale);
-      off.arc(b.x * scale, b.y * scale, b.r * scale, 0, Math.PI * 2);
+      off.moveTo(b.x * scale + rPx, b.y * scale);
+      off.arc(b.x * scale, b.y * scale, rPx, 0, Math.PI * 2);
     }
     off.fill();
     off.globalCompositeOperation = "source-over";
@@ -1053,9 +1068,9 @@
     for (i = 0; i < balls.length; i++) {
       b = balls[i];
       ctx.beginPath();
-      ctx.arc(b.x * scale, b.y * scale, b.r * scale, 0, Math.PI * 2);
-      ctx.lineWidth = (b.covering ? 3 : 2) * scale;
-      ctx.strokeStyle = b.covering ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.45)";
+      ctx.arc(b.x * scale, b.y * scale, rPx, 0, Math.PI * 2);
+      ctx.lineWidth = 1.75 * scale;
+      ctx.strokeStyle = b.covering ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.45)";
       ctx.stroke();
     }
   };
@@ -1100,6 +1115,7 @@
 
     for (var i = 0; i < this.balls.length; i++) {
       var ball = this.balls[i];
+      this.ballRadius(ball); // enforce constant size every frame
       // Continuously refine intercept (angle only queued for next bounce)
       this.refineAim(ball, now);
       this.applySpeed(ball, dt);
@@ -1107,13 +1123,14 @@
 
       var covering = false;
       var q = ball.queue || [];
+      var br = BALL_R;
       for (var qi = 0; qi < q.length; qi++) {
         var a = q[qi];
         var trail = a.trailMs != null ? a.trailMs : COVER_TRAIL_MS;
         // Tight station window around the flip (not the whole approach lead)
         if (now < a.changeAtMs - COVER_HOLD_MS || now > a.changeAtMs + trail) continue;
         var dist = hypot(ball.x - a.x, ball.y - a.y);
-        if (dist + a.r <= ball.r + 1) covering = true;
+        if (dist + a.r <= br + 1) covering = true;
       }
       ball.covering = covering;
     }
