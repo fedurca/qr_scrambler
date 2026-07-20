@@ -52,20 +52,22 @@ Výběr metody v UI (`Maskování`), default **Změny + sníh**. Varianty **pře
 | varianta | popis |
 | --- | --- |
 | **Jen změny** (snow1) | bliká pouze buňky, které se příště změní |
-| **Změny + šum** (snow2) | + rozptýlené náhodné body |
-| **Změny + sníh** (snow3, default) | + padající vločky |
-| **Změny + roj** (snow4) | + body v okolí měněných buněk |
-| **Změny + sken** (snow5) | + vodorovná „scan" linka putující kódem |
-| **Kamufláž** (snow6) | blikají zároveň buňky, které zůstanou **stejné** — reálná změna je nerozeznatelná od návnady |
-| **Interlace** (snow7) | prokládané řádky problikávají (efekt vadného řádkování) |
-| **Statika** (snow8) | hustá „TV statika" po celé datové ploše, změny v ní zaniknou |
-| **Změny z N iterací** (chg1–chg6) | předblikává **sjednocení změn z příštích N iterací** (N=1–6, z vícekrokového forecastu) ve stylu padajícího sněhu; napovídá i vzdálenější změny |
-| **Nejjemnější** (chgmin) | z **20-krokového výhledu** vybere jen buňky, které se od aktuálního kódu **liší nejméně** (nejnižší frekvence odlišnosti přes horizont), a ty jemně problikává → přechod je co nejméně znatelný |
+| **Změny + šum** (snow2) | + rozptýlený anti-pattern šum (blue-noise: vyhýbá se shlukům, řádkům, mřížkám) |
+| **Změny + sníh** (snow3, default) | + padající vločky (sloupce se rozptylují, hustota dle Šum %) |
+| **Změny + roj** (snow4) | + body v okolí měněných buněk + anti-pattern doplnění |
+| **Změny + sken** (snow5) | + řídká „scan" řada (ne plná linka) putující kódem |
+| **Kamufláž** (snow6) | blikají zároveň buňky, které zůstanou **stejné** — anti-pattern výběr |
+| **Interlace** (snow7) | prokládané řádky, řídce a bez pravidelné mřížky |
+| **Statika** (snow8) | hustší anti-pattern „statika" po datové ploše |
+| **Změny z N iterací** (chg) | předblikává **sjednocení změn z příštích N iterací** (N = Dopředný lookup) ve stylu padajícího sněhu |
+| **Nejjemnější** (chgmin) | z **N-krokového výhledu** vybere jen buňky, které se od aktuálního kódu **liší nejméně**, a ty jemně problikává |
 | **žádné** | bez maskování |
 
-`chgmin` počítá 20-krokový výhled levně (jen canonical, bez stabilizace, throttlováno ~2 s) a moduly řadí vzestupně podle toho, jak často se přes horizont liší od aktuálního kódu; bliká jen tu nejjemnější (přední) část, ≤ `perFrameCap` na snímek.
+`chgmin` počítá N-krokový výhled levně (jen canonical, bez stabilizace, throttlováno ~2 s; N z UI) a moduly řadí vzestupně podle toho, jak často se přes horizont liší od aktuálního kódu; bliká jen tu nejjemnější (přední) část, ≤ `perFrameCap` na snímek.
 
-U `chgN` se forecast počítá N kroků dopředu; sjednocení může být velké, ale na snímek se stále inkoustí jen ≤ `perFrameCap` buněk, takže kód zůstává čitelný. Při 1s taktu se vyšší N nemusí stihnout spočítat celé — použije se tolik iterací, kolik forecast stihl.
+U `chg` se forecast počítá N kroků dopředu; sjednocení může být velké, ale na snímek se stále inkoustí jen ≤ `perFrameCap` buněk, takže kód zůstává čitelný. Při rychlém taktu se vyšší N nemusí stihnout spočítat celé — použije se tolik iterací, kolik forecast stihl.
+
+Šum se vybírá greedy blue-noise skórováním (max. min-vzdálenost, penalizace stejného řádku/sloupce, sousedství, opakovaných bliků a mřížky), takže oko nevidí řádky, sloupce ani pravidelné vzory. **Šum %** škáluje, kolik z `perFrameCap` se skutečně využije.
 
 Každý snímek se inkoustí jen **ne-rezervované datové moduly** (nikdy findery/timing/format) a nejvýš `perFrameCap` buněk (kalibrováno tak, že i kdyby všechny byly „chyby", v4+H dekóduje na ~100 %). Kód je proto čitelný v **každém** snímku. Dřívější metody (crossfade, koule, shimmer, měkká záplata, snake, tetris, game of life) zůstávají v kódu, ale nejsou v UI.
 
@@ -73,9 +75,11 @@ Každý snímek se inkoustí jen **ne-rezervované datové moduly** (nikdy finde
 
 - černé pozadí, QR uprostřed, pod QR aktuální URL
 - **Změn za vteřinu** (1–1000) – kolikrát za sekundu se QR přegeneruje. Číselný epoch v URL zůstává v celých sekundách (čtečka čte správný čas); pro sub-sekundové snímky se do padu vloží token slotu, takže i v rámci jedné vteřiny je každý snímek jiný a min-change stabilizér ho drží minimální. Při vysokých hodnotách běží generátor tak rychle, jak stíhá (rozpočet na snímek se zkracuje)
-- **Maskování** – 5 variant předblikávání měněných modulů (default Změny + sníh)
+- **Dopředný lookup** (1–30) – počet iterací forecastu / chg / chgmin výhledu
+- **Šum %** (0–100) – množství maskovacích návnad (0 ≈ jen změny, 100 = plný čitelný cap)
+- **Maskování** – varianty předblikávání měněných modulů (default Změny + sníh)
 - title stránky nese semver (`het68 QR vX.Y.Z`, viz `package.json`)
-- debug: version, engine, decoder, ecc/ver, mask, epoch, raw Δ, flips, %, ~CSS px
+- debug: version, engine, decoder, ecc/ver, **FPS min/avg/max**, lookup, noise, mask, epoch, raw Δ, flips, %, ~CSS px
 
 ## Deploy / self-contained `index.html`
 

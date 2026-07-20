@@ -45,6 +45,14 @@ ${css}
       <input id="changes-per-sec" type="number" min="1" max="1000" step="1" value="1" />
     </label>
     <label>
+      Dopředný lookup
+      <input id="forecast-steps" type="number" min="1" max="30" step="1" value="6" title="Počet iterací dopředného výhledu (forecast / chg / chgmin)" />
+    </label>
+    <label>
+      Šum %
+      <input id="noise-amount" type="number" min="0" max="100" step="1" value="50" title="Množství maskovacího šumu (0 = jen změny, 100 = plný cap)" />
+    </label>
+    <label>
       Maskování
       <select id="mask-method">
         <option value="snow3" selected>Změny + sníh</option>
@@ -55,13 +63,8 @@ ${css}
         <option value="snow6">Kamufláž (změny + stejné)</option>
         <option value="snow7">Interlace</option>
         <option value="snow8">Statika</option>
-        <option value="chg1">Změny z 1 iterace</option>
-        <option value="chg2">Změny z 2 iterací</option>
-        <option value="chg3">Změny z 3 iterací</option>
-        <option value="chg4">Změny z 4 iterací</option>
-        <option value="chg5">Změny z 5 iterací</option>
-        <option value="chg6">Změny z 6 iterací</option>
-        <option value="chgmin">Nejjemnější (z 20 it.)</option>
+        <option value="chg">Změny z N iterací</option>
+        <option value="chgmin">Nejjemnější</option>
         <option value="none">Žádné</option>
       </select>
     </label>
@@ -88,6 +91,9 @@ ${css}
         <dt>ecc / ver</dt><dd id="d-opts">H / 4</dd>
         <dt>render</dt><dd id="d-render">—</dd>
         <dt>interval</dt><dd id="d-interval">1 s</dd>
+        <dt>FPS min/avg/max</dt><dd id="d-fps">—</dd>
+        <dt>lookup</dt><dd id="d-lookup">6</dd>
+        <dt>noise</dt><dd id="d-noise">50%</dd>
         <dt>mask</dt><dd id="d-mask">snow3</dd>
         <dt>forecast</dt><dd id="d-forecast">—</dd>
         <dt>ball pos</dt><dd id="d-ballpos">—</dd>
