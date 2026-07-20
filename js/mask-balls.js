@@ -43,7 +43,10 @@
   /** Leave soon after the flip is painted. */
   var COVER_TRAIL_MS = 50;
   /** Aim to arrive this early so HOLD window is non-empty. */
-  var ARRIVE_EARLY_MS = 110;
+  var ARRIVE_EARLY_MS = 160;
+  /** Start braking when this close — high speed through a tight disc overshoots. */
+  var BRAKE_DIST = BALL_R * 2.15;
+  var CRAWL_DIST = BALL_R * 1.35;
   /**
    * Once a job is this close to flip (or already in trail), reassignment must
    * not drop it — otherwise prefetch for N+1 abandons cover for flip N.
@@ -557,12 +560,13 @@
     var leadMs = COVER_LEAD_MS;
     var trailMs = COVER_TRAIL_MS;
     var now = Date.now();
+    var grace = this.paintGraceMs();
     var built = [];
     for (var i = 0; i < events.length; i++) {
       var ev = events[i];
       if (!ev.diffs || !ev.diffs.length) continue;
-      // Keep events still in cover window; skip only fully expired flips
-      if (ev.changeAtMs + trailMs < now - 30) continue;
+      // Keep until paint grace — trail alone drops the flip before real paint
+      if (ev.changeAtMs + grace < now - 30) continue;
       var targets = this.clusterDiffs(ev.diffs, ev, qr);
       if (!targets.length) continue;
       built.push({
@@ -587,8 +591,7 @@
     var prev = this.events || [];
     for (i = 0; i < prev.length; i++) {
       var pe = prev[i];
-      var pTrail = pe.trailMs != null ? pe.trailMs : COVER_TRAIL_MS;
-      if (pe.changeAtMs + pTrail > now - 30) bySlot[pe.slot] = pe;
+      if (pe.changeAtMs + grace > now - 30) bySlot[pe.slot] = pe;
     }
     for (i = 0; i < built.length; i++) {
       bySlot[built[i].slot] = built[i];
@@ -704,10 +707,10 @@
         job.locked = true;
       }
     }
+    var graceAfter = this.paintGraceMs();
     this.events = this.events.filter(function (ev) {
       if (slot != null && ev.slot === slot) return false; // consumed
-      var trail = ev.trailMs != null ? ev.trailMs : COVER_TRAIL_MS;
-      return ev.changeAtMs + trail > now - 20;
+      return ev.changeAtMs + graceAfter > now - 20;
     });
     this.pruneBallQueues(now);
   };
@@ -1344,7 +1347,11 @@
 
     var msToFlip = job.changeAtMs - now;
     var dist = hypot(ball.x - job.x, ball.y - job.y);
-    var onDisc = dist + job.r <= BALL_R + 2;
+    // Slight slack: perfect disc fit is ~BALL_R−r; at high speed that window is one frame
+    var onDisc = dist + job.r <= BALL_R + 10;
+    var coveringCenter = dist <= BALL_R * 0.75;
+    var nearApproach = dist <= BRAKE_DIST;
+    var veryNear = dist <= CRAWL_DIST;
     // Waiting for late paint: treat as still in cover window past planned time
     var waitingPaint = !job.painted && msToFlip < 0 && this.jobStillActive(job, now);
     var inCoverWindow = (msToFlip <= COVER_HOLD_MS && msToFlip >= -trailMs) || waitingPaint;
@@ -1356,8 +1363,8 @@
       return;
     }
 
-    // On disc around the flip (or waiting for late paint): linger so modules stay covered
-    if (onDisc && inCoverWindow) {
+    // On disc / covering center around the flip: linger (cannot reverse mid-air)
+    if ((onDisc || coveringCenter) && inCoverWindow) {
       ball.evacuating = false;
       ball.needEvacuate = false;
       ball.covering = true;
@@ -1374,14 +1381,37 @@
       return;
     }
 
-    // Past planned flip, not on disc yet, paint not confirmed → keep rushing in
-    if (waitingPaint && !onDisc) {
+    // Past planned flip, not on disc yet, paint not confirmed
+    if (waitingPaint && !onDisc && !coveringCenter) {
       ball.evacuating = false;
       ball.needEvacuate = false;
       var rushPlan = this.planIntercept(ball, job, now + 120, now);
       if (rushPlan) this.applyPlan(ball, rushPlan);
-      ball.targetSpeed = MAX_SPEED;
-      ball.planKind = "late-paint";
+      // Close: crawl — MAX_SPEED through the disc overshoots with no mid-air reverse
+      if (nearApproach) {
+        ball.targetSpeed = clamp(dist / 0.22, MIN_SPEED, BASE_SPEED * 0.95);
+        ball.planKind = "brake-paint";
+      } else {
+        ball.targetSpeed = MAX_SPEED;
+        ball.planKind = "late-paint";
+      }
+      return;
+    }
+
+    // Approaching: brake early so we do not fly through the cover disc
+    if (nearApproach && msToFlip >= 0 && msToFlip < 1100) {
+      ball.evacuating = false;
+      ball.needEvacuate = false;
+      var brakePlan = this.planIntercept(ball, job, job.changeAtMs, now);
+      if (brakePlan) this.applyPlan(ball, brakePlan);
+      var tSec = Math.max(0.16, msToFlip / 1000);
+      var cap = clamp(dist / Math.max(0.14, tSec * 0.5), MIN_SPEED, MAX_SPEED);
+      if (veryNear || msToFlip < COVER_HOLD_MS + 220) {
+        cap = Math.min(cap, clamp(dist / 0.28, MIN_SPEED, BASE_SPEED * 0.8));
+      }
+      if (ball.targetSpeed == null || ball.targetSpeed > cap) ball.targetSpeed = cap;
+      if (veryNear) ball.planKind = "brake";
+      else if (!ball.planKind) ball.planKind = "prelinger";
       return;
     }
 
@@ -1402,7 +1432,9 @@
     var plan = this.planIntercept(ball, job, job.changeAtMs, now);
     if (!plan) {
       // Fallback: rush toward target via next bounce
-      ball.targetSpeed = MAX_SPEED;
+      ball.targetSpeed = nearApproach
+        ? clamp(dist / 0.25, MIN_SPEED, BASE_SPEED)
+        : MAX_SPEED;
       var probe = {
         x: ball.x,
         y: ball.y,
@@ -1414,15 +1446,17 @@
       var nb = this.nextBounce(probe, 20);
       if (nb) {
         ball.pendingAngle = Math.atan2(job.y - nb.y, job.x - nb.x);
-        ball.postSpeed = MAX_SPEED;
+        ball.postSpeed = nearApproach
+          ? clamp(dist / 0.3, MIN_SPEED, BASE_SPEED)
+          : MAX_SPEED;
       }
       return;
     }
     this.applyPlan(ball, plan);
 
-    // If plan is late/poor and flip is soon, force max speed
+    // Late/poor plan + soon: max speed only when still far (near → brake, don't blast)
     if ((plan.kind === "late" || plan.kind === "rush" || (plan.miss != null && plan.miss > BALL_R)) &&
-        msToFlip < 900) {
+        msToFlip < 900 && !nearApproach) {
       ball.targetSpeed = MAX_SPEED;
     }
   };
@@ -1491,8 +1525,8 @@
       var oldQ = ball.queue || [];
       for (var qi = 0; qi < oldQ.length; qi++) {
         var oldJob = oldQ[qi];
-        var trail = oldJob.trailMs != null ? oldJob.trailMs : COVER_TRAIL_MS;
-        if (now > oldJob.changeAtMs + trail) continue;
+        // Honor paint grace — trail alone drops unpainted cover before real paint
+        if (!this.jobStillActive(oldJob, now)) continue;
         if (this.jobIsLocked(oldJob, now)) {
           oldJob.locked = true;
           oldJob.ballId = ball.colorId;
@@ -1508,15 +1542,32 @@
       return a.changeAtMs - b.changeAtMs;
     });
     var iv = this.intervalMs || 1000;
+    var grace = this.paintGraceMs();
+    var lockLead = this.jobLockLeadMs();
     // Next flip only (+ one lookahead). Far horizon steals balls from the imminent paint.
     var maxAhead = 2;
     var horizonMs = iv * maxAhead + 80;
     events = events.filter(function (ev) {
-      var eTrail = ev.trailMs != null ? ev.trailMs : COVER_TRAIL_MS;
-      if (now >= ev.changeAtMs - self.jobLockLeadMs()) return true;
-      if (now > ev.changeAtMs + eTrail) return false;
+      if (now >= ev.changeAtMs - lockLead) return now <= ev.changeAtMs + grace;
+      if (now > ev.changeAtMs + grace) return false;
       return ev.changeAtMs - now <= horizonMs;
     });
+
+    // While flip N is in lock/paint window, do not staff N+1 — that was the first-flip miss
+    var focusEv = null;
+    for (var fe = 0; fe < events.length; fe++) {
+      var fEv = events[fe];
+      if (now >= fEv.changeAtMs - lockLead && now <= fEv.changeAtMs + grace) {
+        focusEv = fEv;
+        break;
+      }
+    }
+    if (focusEv) {
+      events = events.filter(function (ev) {
+        return ev.slot === focusEv.slot ||
+          Math.abs(ev.changeAtMs - focusEv.changeAtMs) < 80;
+      });
+    }
 
     // Remap locked jobs onto current event targets (same slot)
     for (i = 0; i < this.balls.length; i++) {
@@ -1994,17 +2045,20 @@
         }
         if (!inWin) continue;
         var dist = hypot(ball.x - a.x, ball.y - a.y);
-        if (dist + a.r <= br + 2) covering = true;
+        if (dist + a.r <= br + 10 || dist <= br * 0.75) covering = true;
       }
-      if ((ball.planKind === "linger" || ball.planKind === "wait-paint") && ball.covering) covering = true;
+      if ((ball.planKind === "linger" || ball.planKind === "wait-paint" ||
+           ball.planKind === "brake" || ball.planKind === "brake-paint") &&
+          ball.covering) covering = true;
       ball.covering = covering;
     }
 
     this.paint();
 
+    var tickGrace = this.paintGraceMs();
     this.events = this.events.filter(function (ev) {
-      var trail = ev.trailMs != null ? ev.trailMs : COVER_TRAIL_MS;
-      return ev.changeAtMs + trail > now - 40;
+      // Keep unpainted flips through paint grace (trail is only post-paint)
+      return ev.changeAtMs + tickGrace > now - 40;
     });
     this.pruneBallQueues(now);
     this.emitPlanDebug(now, false);
