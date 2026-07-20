@@ -19,21 +19,26 @@
     }
   })();
 
-  // Grid profile. Higher ECC = larger Reed-Solomon basin = the stabilizer may
-  // keep far more modules identical to the previous frame (fewer flips). The pad
-  // auto-fills to capacity (see computePadLen), so payload never overflows — the
-  // only cost of a higher version is module density, offset by a larger DRAW_SIZE.
-  // v4 + Q is one step denser than the old v3 (33x33 vs 29x29) but ~2.5x the EC
-  // budget. Switch to { version: 5, ecc: "H" } for the fewest flips once a cheap
-  // phone confirms readability. Boot logs "Grid measure" to compare profiles.
+  // Grid profile. The dominant lever for minimal change is the Reed-Solomon
+  // budget: the stabilizer may keep prev's modules in up to floor(EC/2)
+  // codewords per block, so more EC codewords = fewer flips. The pad auto-fills
+  // to capacity (see computePadLen), so payload never overflows — the only cost
+  // of higher EC/version is module density, offset by a larger DRAW_SIZE.
+  //
+  // Measured avg flips over sequential epochs (vm harness, jsQR-verified):
+  //   v3+L 28 (3.33%) · v4+Q 41 (3.76%) · v4+H 28 (2.57%) · v5+Q 30 (2.19%) · v5+H 35 (2.56%)
+  // v4+H gives the fewest absolute flips at the same 33x33 density we already
+  // ship, so it is the default. v5+Q has the lowest percentage if a denser
+  // (37x37) symbol is acceptable — switch here and confirm cheap-phone reading.
   var VERSION = 4;
-  var ECC = "Q";
+  var ECC = "H";
   var MARGIN = 2;
   var DRAW_SIZE = IS_MOBILE ? 260 : 300;
   var DECODE_SCALE = 4;
   /** Candidate profiles for the boot-time flip measurement (tuning aid only). */
   var GRID_PROFILES = [
-    { version: 4, ecc: "Q" },
+    { version: 4, ecc: "H" },
+    { version: 5, ecc: "Q" },
     { version: 5, ecc: "H" },
     { version: 3, ecc: "L" }
   ];
@@ -725,29 +730,78 @@
     return best;
   }
 
-  /** Top-N canonical candidates ordered by raw diff (for multi-candidate stabilize). */
-  function chooseCanonicalList(api, epoch, prevModules, prevPad, topN) {
-    var cands = [];
+  function mutatePadAt(pad, pos, ch) {
+    return pad.substring(0, pos) + ch + pad.substring(pos + 1);
+  }
+
+  /**
+   * Hill-climb the free pad to minimize the raw module distance to prev for a
+   * fixed mask. The pad occupies free data codewords, so aligning it with the
+   * previous frame directly shrinks the forced changes before RS sacrifice.
+   * Objective is raw Hamming (cheap, strong proxy for post-sacrifice flips).
+   */
+  function optimizePad(api, epoch, prevModules, startPad, mask, deadline, shouldCancel) {
+    var pad = startPad || "";
+    var url = buildUrl(epoch, pad);
+    var mods = createModules(api, url, mask);
+    var bestRaw = listDiffs(prevModules, mods).length;
+    var len = pad.length;
+    if (len === 0) return { pad: pad, url: url, mask: mask, modules: mods, raw: bestRaw };
+    var stale = 0;
+    var cap = len * 4;
+    while (Date.now() < deadline && stale < cap) {
+      if (shouldCancel && shouldCancel()) break;
+      var pos = (Math.random() * len) | 0;
+      var ch = PAD_ALPHABET[(Math.random() * PAD_ALPHABET.length) | 0];
+      if (ch === pad.charAt(pos)) continue;
+      var trialPad = mutatePadAt(pad, pos, ch);
+      var turl = buildUrl(epoch, trialPad);
+      var tmods = createModules(api, turl, mask);
+      var raw = listDiffs(prevModules, tmods).length;
+      if (raw < bestRaw) {
+        bestRaw = raw;
+        pad = trialPad;
+        url = turl;
+        mods = tmods;
+        stale = 0;
+      } else {
+        stale += 1;
+      }
+    }
+    return { pad: pad, url: url, mask: mask, modules: mods, raw: bestRaw };
+  }
+
+  /**
+   * Candidate set for minimal change: scan masks, hill-climb the pad on the best
+   * mask, re-scan masks on the optimized pad, and return the top-N lowest-raw
+   * distinct candidates. Each is then RS-stabilized; the global minimum wins.
+   */
+  function buildCandidates(api, epoch, prevModules, prevPad, deadline, shouldCancel, topN) {
+    var startPad = prevPad || "";
+    var all = [];
     function consider(pad, mask) {
       var url = buildUrl(epoch, pad);
       var modules = createModules(api, url, mask);
-      var raw = prevModules ? listDiffs(prevModules, modules).length : 0;
-      cands.push({ url: url, pad: pad, mask: mask, modules: modules, raw: raw });
+      all.push({ url: url, pad: pad, mask: mask, modules: modules, raw: listDiffs(prevModules, modules).length });
     }
     var mask;
-    for (mask = 0; mask < 8; mask++) consider(prevPad, mask);
-    cands.sort(function (a, b) { return a.raw - b.raw; });
-    var basePad = cands[0].pad;
-    var baseMask = cands[0].mask;
-    for (var t = 0; t < 12; t++) consider(mutatePadSuffix(basePad, state.padLen), baseMask);
-    cands.sort(function (a, b) { return a.raw - b.raw; });
+    for (mask = 0; mask < 8; mask++) consider(startPad, mask);
+    all.sort(function (a, b) { return a.raw - b.raw; });
+    var m0 = all[0].mask;
+
+    // Hill-climb the pad on the best starting mask for the bulk of the budget.
+    var opt = optimizePad(api, epoch, prevModules, startPad, m0, deadline, shouldCancel);
+    // Re-scan masks on the optimized pad (mask shifts the whole data pattern).
+    for (mask = 0; mask < 8; mask++) consider(opt.pad, mask);
+
+    all.sort(function (a, b) { return a.raw - b.raw; });
     var seen = {};
     var out = [];
-    for (var i = 0; i < cands.length && out.length < (topN || 3); i++) {
-      var key = cands[i].mask + "|" + cands[i].url;
+    for (var i = 0; i < all.length && out.length < (topN || 3); i++) {
+      var key = all[i].mask + "|" + all[i].url;
       if (seen[key]) continue;
       seen[key] = 1;
-      out.push(cands[i]);
+      out.push(all[i]);
     }
     return out;
   }
@@ -767,11 +821,15 @@
       };
     }
 
-    // Stabilize the top-N lowest-raw candidates and keep the global minimum:
-    // a higher-raw candidate often stabilizes to fewer flips than the lowest-raw one.
-    var cands = chooseCanonicalList(api, epoch, prevModules, prevPad || state.pad, 3);
     var deadlineAll = Date.now() + budgetMs;
-    var perBudget = Math.max(90, Math.floor(budgetMs / cands.length));
+    // Spend up to ~55% of the budget searching the free pad/mask space, the rest
+    // on RS stabilization of the best candidates.
+    var searchDeadline = Date.now() + Math.max(60, Math.floor(budgetMs * 0.55));
+    var cands = buildCandidates(
+      api, epoch, prevModules, prevPad || state.pad,
+      Math.min(searchDeadline, deadlineAll), shouldCancel, 3
+    );
+    var perBudget = Math.max(80, Math.floor((deadlineAll - Date.now()) / cands.length));
     var bestCanon = null;
     var bestRes = null;
     for (var i = 0; i < cands.length; i++) {
