@@ -81,7 +81,7 @@ Každý snímek se inkoustí jen **ne-rezervované datové moduly** (nikdy finde
 - **Maskování** – varianty předblikávání měněných modulů (default Změny + sníh)
 - **Záznam s** + **Export videa** – klientský záznam QR oblasti (včetně maskovacích overlayů) přes `MediaRecorder` → stažení `.webm`/`.mp4`; délka 1–120 s
 - title stránky nese semver (`het68 QR vX.Y.Z`, viz `package.json`)
-- debug: version, engine, decoder, ecc/ver, **FPS min/avg/max**, lookup, noise, rec, settings URL, mask, epoch, raw Δ, flips, %, ~CSS px
+- debug: version, engine, decoder, ecc/ver, **FPS min/avg/max**, lookup, noise, change %, rec, settings URL, mask, epoch, raw Δ, flips, %, ~CSS px
 
 ### URL parametry nastavení
 
