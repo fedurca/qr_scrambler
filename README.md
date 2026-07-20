@@ -24,24 +24,24 @@ Na přijímací straně stačí po naskenování zavolat `decodePayload()` a pad
 
 ## Jak se drží minimální změna
 
-1. **Vyšší ECC rezerva místo nižší** – default **version 4 + ECC H** (33×33). Pad se dopočítává na kapacitu (`computePadLen`), takže payload nikdy nepřeteče; jediná cena vyšší verze je hustota, kterou vyrovná větší `DRAW_SIZE`. Víc opravných codewordů = větší Reed-Solomonův basin = stabilizér smí ponechat víc modulů shodných s předchozím snímkem. **To je hlavní páka** – rozpočet obětovaných codewordů (≈ `floor(EC/2)` na blok) přímo určuje počet flipů. `VERSION`/`ECC` v `js/app.js`.
+1. **Nejmenší symbol pro nejmenší změnu** – default **version 2 + ECC L** (25×25). Při 1s taktu je hlavním zdrojem změny **RS difuze**: změna jednoho epoch-bajtu přepočítá všechny EC codewordy, takže dolní mez počtu změněných modulů určuje hlavně **počet modulů symbolu**. v2 je nejmenší symbol, do kterého se payload vejde, takže mění nejméně modulů (~15 vs 28 u v4+H) a má největší, na levném telefonu nejčitelnější moduly. Kompromis: ECC-L má malou rezervu pro čtečku, takže in-QR arcade masky samy omezují množství „inkoustu". Pro nejnižší **procento**/nejmenší plochu změny lze přepnout na `{ version: 6, ecc: "M" }` (41×41, hustší) nebo `{ version: 5, ecc: "Q" }`. `VERSION`/`ECC` v `js/app.js`. Pad se dopočítává na kapacitu (`computePadLen`), takže payload nikdy nepřeteče.
 2. **Dlouhý padding + pad hill-climb** – epoch je v dlouhém stringu, který vyplní kapacitu; volný pad se **hill-climbem** ladí tak, aby data codewordy seděly na předchozí snímek (minimalizuje raw diff před RS obětováním). Souběžně se přehledá všech 8 masek.
 3. **Analytický codeword-stabilizér** (`js/qr-structure.js`) – každý modul patří právě jednomu codewordu (deterministický zigzag placement). Dekódování přežije, dokud se od cíle liší ≤ `floor(EC/2)` codewordů; codeword s 1 rozdílným modulem stojí stejně jako s 8. Stabilizér **seskupí diffy podle codewordu** a ponechá předchozí moduly v codewordech s největší úsporou, se sekundárním **shlukováním** do souvislé oblasti. Výsledek se vždy **jednorázově ověří dekodérem**; jinak fallback na heuristické dual-direction půlení.
 4. **Top-N kandidátů** – stabilizuje se víc pad/mask kandidátů a drží se globální minimum flipů.
 5. **Prefetch** – výpočet pro `epoch+1` během aktuálního intervalu.
 6. **Okamžitý canonical paint** + render fallback řetězec: **canvas → SVG → img(SVG)** (na mobilu SVG první). Pro crossfade se okamžitý paint odloží, aby změna „naběhla" z předchozího snímku.
 
-### Naměřené profily (vm harness, jsQR-ověřeno, avg flips přes sekvenční epochy)
+### Naměřené profily při 1s taktu (vm harness, jsQR-ověřeno, avg flips, plocha @300px)
 
-| profil | mřížka | avg flips | % modulů |
-| --- | --- | ---: | ---: |
-| v3 + L | 29×29 | 28 | 3.33 % |
-| v4 + Q | 33×33 | 41 | 3.76 % |
-| **v4 + H** (default) | 33×33 | **28** | **2.57 %** |
-| v5 + H | 37×37 | 35 | 2.56 % |
-| v5 + Q | 37×37 | 30 | **2.19 %** |
+| profil | mřížka | avg flips | % modulů | plocha změny |
+| --- | --- | ---: | ---: | ---: |
+| **v2 + L** (default) | 25×25 | **15** | 2.44 % | 1634 |
+| v6 + M | 41×41 | 26 | **1.53 %** | **1143** |
+| v5 + Q | 37×37 | 30 | 2.22 % | 1631 |
+| v4 + H | 33×33 | 28 | 2.57 % | 1841 |
+| v3 + L | 29×29 | 29 | 3.44 % | 2389 |
 
-`v4+H` má nejméně absolutních flipů při stejné hustotě jako dřív nasazené `v4`; `v5+Q` má nejnižší procento, pokud je přijatelný hustší symbol. Boot log `Grid measure` změří profily naživo pár sekund po startu.
+`v2+L` mění **nejméně modulů** (~15) a je nejčitelnější (největší moduly) — nejpřímější odpověď na „změna je moc velká". `v6+M` má nejnižší procento a nejmenší celkovou plochu změny, pokud je přijatelný hustší symbol. Boot log `Grid measure` změří profily naživo pár sekund po startu.
 
 Hard floor: dvě různá QR data musí ležet v různých RS codeword basins; pod ~0.2 % už typicky nejde bez změny protokolu.
 

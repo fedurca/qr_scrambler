@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="application-version" content="1.5.1" />
-  <title>v1.5.1 het68 QR</title>
+  <meta name="application-version" content="1.5.2" />
+  <title>v1.5.2 het68 QR</title>
   <style>
 :root {
   color-scheme: dark;
@@ -311,11 +311,11 @@ main {
     </header>
     <div class="body">
       <dl>
-        <dt>version</dt><dd id="d-version">1.5.1</dd>
+        <dt>version</dt><dd id="d-version">1.5.2</dd>
         <dt>engine</dt><dd id="d-engine">—</dd>
         <dt>source</dt><dd id="d-source">—</dd>
         <dt>decoder</dt><dd id="d-decoder">—</dd>
-        <dt>ecc / ver</dt><dd id="d-opts">H / 4</dd>
+        <dt>ecc / ver</dt><dd id="d-opts">L / 2</dd>
         <dt>render</dt><dd id="d-render">—</dd>
         <dt>interval</dt><dd id="d-interval">5 s</dd>
         <dt>mask</dt><dd id="d-mask">crossfade</dd>
@@ -10461,7 +10461,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
 });
   </script>
   <script>
-window.APP_VERSION="1.5.1";
+window.APP_VERSION="1.5.2";
 
   </script>
   <script>
@@ -12738,11 +12738,17 @@ window.APP_VERSION="1.5.1";
     this.size = 0;       // modules per side (data area)
     this.margin = 2;
     this.cell = 0;       // device px per module
+    this.maxInk = 20;    // max simultaneously overlaid modules (ECC-budget safe)
     this.state = null;
     this._loop = this.loop.bind(this);
   }
 
   MaskArcade.MODES = ["snake", "tetris", "life", "snow"];
+
+  // Safe overlaid-module fraction by ECC level: the reader must still correct the
+  // overlaid cells as errors, so keep well under floor(EC/2). Roughly half the
+  // overlaid cells fall on already-dark modules (free), so these are conservative.
+  MaskArcade.INK_FRAC = { L: 0.008, M: 0.035, Q: 0.06, H: 0.10 };
 
   MaskArcade.prototype.ensureCanvas = function () {
     if (this.canvas) return this.canvas;
@@ -12779,6 +12785,8 @@ window.APP_VERSION="1.5.1";
     this.canvas.height = Math.max(1, Math.round(h * this.dpr));
     var n = this.size + this.margin * 2;
     this.cell = this.canvas.width / n;
+    var frac = MaskArcade.INK_FRAC[info.ecc] != null ? MaskArcade.INK_FRAC[info.ecc] : 0.05;
+    this.maxInk = Math.max(5, Math.floor(this.size * this.size * frac));
     return true;
   };
 
@@ -12843,9 +12851,10 @@ window.APP_VERSION="1.5.1";
   // ---- Snake -------------------------------------------------------------
   MaskArcade.prototype.newSnake = function () {
     var s = (this.size / 2) | 0;
+    var len = Math.max(4, Math.min(14, this.maxInk));
     var body = [];
-    for (var i = 0; i < 10; i++) body.push({ x: s - i, y: s });
-    return { body: body, dir: { x: 1, y: 0 }, len: 12, turn: 0 };
+    for (var i = 0; i < len; i++) body.push({ x: s - i, y: s });
+    return { body: body, dir: { x: 1, y: 0 }, len: len, turn: 0 };
   };
 
   MaskArcade.prototype.stepSnake = function () {
@@ -12888,7 +12897,8 @@ window.APP_VERSION="1.5.1";
   };
 
   MaskArcade.prototype.newTetris = function () {
-    return { pieces: [this.spawnPiece()], spawnIn: 3 };
+    // Each piece is 4 cells; allow a 2nd only when the ink budget covers it.
+    return { pieces: [this.spawnPiece()], spawnIn: 3, maxPieces: this.maxInk >= 8 ? 2 : 1 };
   };
 
   MaskArcade.prototype.stepTetris = function () {
@@ -12902,7 +12912,7 @@ window.APP_VERSION="1.5.1";
       if (top >= this.size) st.pieces.splice(i, 1); // fell through
     }
     st.spawnIn -= 1;
-    if (st.spawnIn <= 0 && st.pieces.length < 2) {
+    if (st.spawnIn <= 0 && st.pieces.length < (st.maxPieces || 1)) {
       st.pieces.push(this.spawnPiece());
       st.spawnIn = 4 + ((Math.random() * 4) | 0);
     }
@@ -12920,7 +12930,9 @@ window.APP_VERSION="1.5.1";
 
   MaskArcade.prototype.seedGliders = function (st) {
     st.grid = new Uint8Array(this.size * this.size);
-    var count = 3 + ((Math.random() * 3) | 0);
+    // Each glider is 5 cells; scale glider count to the ink budget.
+    var maxG = Math.max(1, Math.floor(this.maxInk / 5));
+    var count = Math.max(1, Math.min(maxG, 2 + ((Math.random() * 3) | 0)));
     for (var g = 0; g < count; g++) {
       var ox = (Math.random() * this.size) | 0;
       var oy = (Math.random() * this.size) | 0;
@@ -12960,13 +12972,13 @@ window.APP_VERSION="1.5.1";
     st.grid = next;
     st.gen++;
     // Keep it sparse & glider-like: reseed on overcrowding, extinction, or age.
-    if (pop > N * N * 0.10 || pop < 4 || st.gen > 90) this.seedGliders(st);
+    if (pop > this.maxInk || pop < 4 || st.gen > 90) this.seedGliders(st);
   };
 
   // ---- Snow (flakes drift down the code) ---------------------------------
   MaskArcade.prototype.newSnow = function () {
     var flakes = [];
-    var count = Math.max(6, (this.size * 0.4) | 0);
+    var count = Math.max(4, Math.min(this.maxInk, (this.size * 0.4) | 0));
     for (var i = 0; i < count; i++) {
       flakes.push({
         x: (Math.random() * this.size) | 0,
@@ -13330,22 +13342,27 @@ window.APP_VERSION="1.5.1";
   // to capacity (see computePadLen), so payload never overflows — the only cost
   // of higher EC/version is module density, offset by a larger DRAW_SIZE.
   //
-  // Measured avg flips over sequential epochs (vm harness, jsQR-verified):
-  //   v3+L 28 (3.33%) · v4+Q 41 (3.76%) · v4+H 28 (2.57%) · v5+Q 30 (2.19%) · v5+H 35 (2.56%)
-  // v4+H gives the fewest absolute flips at the same 33x33 density we already
-  // ship, so it is the default. v5+Q has the lowest percentage if a denser
-  // (37x37) symbol is acceptable — switch here and confirm cheap-phone reading.
-  var VERSION = 4;
-  var ECC = "H";
+  // Measured avg flips at 1s cadence (epoch += 1) — full pipeline, jsQR-verified:
+  //   v2+L 15 (2.44%) · v6+M 26 (1.53%) · v5+Q 30 (2.22%) · v4+H 28 (2.57%) · v3+L 29 (3.44%)
+  // The dominant driver at 1s is Reed-Solomon diffusion: one changed epoch byte
+  // recomputes every EC codeword, so the floor is set by how few modules the
+  // symbol has. v2+L is the smallest symbol that still holds the payload, so it
+  // changes the FEWEST modules (~15 vs 28) and has the largest, most cheap-phone
+  // -readable modules. Trade-off: ECC-L has little reader headroom, so the in-QR
+  // arcade masks self-limit their ink (see mask-arcade). For the lowest CHANGE
+  // PERCENTAGE / smallest changed area instead, switch to { version: 6, ecc: "M" }
+  // (41x41, denser) or { version: 5, ecc: "Q" }.
+  var VERSION = 2;
+  var ECC = "L";
   var MARGIN = 2;
   var DRAW_SIZE = IS_MOBILE ? 260 : 300;
   var DECODE_SCALE = 4;
   /** Candidate profiles for the boot-time flip measurement (tuning aid only). */
   var GRID_PROFILES = [
-    { version: 4, ecc: "H" },
+    { version: 2, ecc: "L" },
+    { version: 6, ecc: "M" },
     { version: 5, ecc: "Q" },
-    { version: 5, ecc: "H" },
-    { version: 3, ecc: "L" }
+    { version: 4, ecc: "H" }
   ];
   var STABILIZE_BUDGET_MS = IS_MOBILE ? 350 : 500;
   var PREFETCH_BUDGET_MS = IS_MOBILE ? 550 : 800;
@@ -13442,7 +13459,7 @@ window.APP_VERSION="1.5.1";
     var rect = getQrContentRect();
     if (!rect) return null;
     var size = state.prevModules ? moduleSize(state.prevModules) : (17 + 4 * VERSION);
-    return { rect: rect, size: size, margin: MARGIN };
+    return { rect: rect, size: size, margin: MARGIN, ecc: ECC };
   }
 
   function now() {

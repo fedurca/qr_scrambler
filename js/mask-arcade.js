@@ -32,11 +32,17 @@
     this.size = 0;       // modules per side (data area)
     this.margin = 2;
     this.cell = 0;       // device px per module
+    this.maxInk = 20;    // max simultaneously overlaid modules (ECC-budget safe)
     this.state = null;
     this._loop = this.loop.bind(this);
   }
 
   MaskArcade.MODES = ["snake", "tetris", "life", "snow"];
+
+  // Safe overlaid-module fraction by ECC level: the reader must still correct the
+  // overlaid cells as errors, so keep well under floor(EC/2). Roughly half the
+  // overlaid cells fall on already-dark modules (free), so these are conservative.
+  MaskArcade.INK_FRAC = { L: 0.008, M: 0.035, Q: 0.06, H: 0.10 };
 
   MaskArcade.prototype.ensureCanvas = function () {
     if (this.canvas) return this.canvas;
@@ -73,6 +79,8 @@
     this.canvas.height = Math.max(1, Math.round(h * this.dpr));
     var n = this.size + this.margin * 2;
     this.cell = this.canvas.width / n;
+    var frac = MaskArcade.INK_FRAC[info.ecc] != null ? MaskArcade.INK_FRAC[info.ecc] : 0.05;
+    this.maxInk = Math.max(5, Math.floor(this.size * this.size * frac));
     return true;
   };
 
@@ -137,9 +145,10 @@
   // ---- Snake -------------------------------------------------------------
   MaskArcade.prototype.newSnake = function () {
     var s = (this.size / 2) | 0;
+    var len = Math.max(4, Math.min(14, this.maxInk));
     var body = [];
-    for (var i = 0; i < 10; i++) body.push({ x: s - i, y: s });
-    return { body: body, dir: { x: 1, y: 0 }, len: 12, turn: 0 };
+    for (var i = 0; i < len; i++) body.push({ x: s - i, y: s });
+    return { body: body, dir: { x: 1, y: 0 }, len: len, turn: 0 };
   };
 
   MaskArcade.prototype.stepSnake = function () {
@@ -182,7 +191,8 @@
   };
 
   MaskArcade.prototype.newTetris = function () {
-    return { pieces: [this.spawnPiece()], spawnIn: 3 };
+    // Each piece is 4 cells; allow a 2nd only when the ink budget covers it.
+    return { pieces: [this.spawnPiece()], spawnIn: 3, maxPieces: this.maxInk >= 8 ? 2 : 1 };
   };
 
   MaskArcade.prototype.stepTetris = function () {
@@ -196,7 +206,7 @@
       if (top >= this.size) st.pieces.splice(i, 1); // fell through
     }
     st.spawnIn -= 1;
-    if (st.spawnIn <= 0 && st.pieces.length < 2) {
+    if (st.spawnIn <= 0 && st.pieces.length < (st.maxPieces || 1)) {
       st.pieces.push(this.spawnPiece());
       st.spawnIn = 4 + ((Math.random() * 4) | 0);
     }
@@ -214,7 +224,9 @@
 
   MaskArcade.prototype.seedGliders = function (st) {
     st.grid = new Uint8Array(this.size * this.size);
-    var count = 3 + ((Math.random() * 3) | 0);
+    // Each glider is 5 cells; scale glider count to the ink budget.
+    var maxG = Math.max(1, Math.floor(this.maxInk / 5));
+    var count = Math.max(1, Math.min(maxG, 2 + ((Math.random() * 3) | 0)));
     for (var g = 0; g < count; g++) {
       var ox = (Math.random() * this.size) | 0;
       var oy = (Math.random() * this.size) | 0;
@@ -254,13 +266,13 @@
     st.grid = next;
     st.gen++;
     // Keep it sparse & glider-like: reseed on overcrowding, extinction, or age.
-    if (pop > N * N * 0.10 || pop < 4 || st.gen > 90) this.seedGliders(st);
+    if (pop > this.maxInk || pop < 4 || st.gen > 90) this.seedGliders(st);
   };
 
   // ---- Snow (flakes drift down the code) ---------------------------------
   MaskArcade.prototype.newSnow = function () {
     var flakes = [];
-    var count = Math.max(6, (this.size * 0.4) | 0);
+    var count = Math.max(4, Math.min(this.maxInk, (this.size * 0.4) | 0));
     for (var i = 0; i < count; i++) {
       flakes.push({
         x: (Math.random() * this.size) | 0,
