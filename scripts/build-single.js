@@ -42,19 +42,12 @@ ${css}
   <section id="controls" aria-label="Nastavení">
     <label>
       Interval epochy (s)
-      <input id="epoch-interval" type="number" min="1" max="120" step="1" value="5" />
+      <input id="epoch-interval" type="number" min="1" max="120" step="1" value="1" />
     </label>
     <label>
       Maskování
       <select id="mask-method">
-        <option value="crossfade" selected>Crossfade</option>
-        <option value="balls">Koule</option>
-        <option value="shimmer">Shimmer</option>
-        <option value="softpatch">Měkká záplata</option>
-        <option value="snake">Snake</option>
-        <option value="tetris">Tetris</option>
-        <option value="life">Game of Life</option>
-        <option value="snow">Sněžení</option>
+        <option value="snow" selected>Sněžení</option>
         <option value="none">Žádné</option>
       </select>
     </label>
@@ -78,10 +71,10 @@ ${css}
         <dt>engine</dt><dd id="d-engine">—</dd>
         <dt>source</dt><dd id="d-source">—</dd>
         <dt>decoder</dt><dd id="d-decoder">—</dd>
-        <dt>ecc / ver</dt><dd id="d-opts">L / 2</dd>
+        <dt>ecc / ver</dt><dd id="d-opts">H / 4</dd>
         <dt>render</dt><dd id="d-render">—</dd>
-        <dt>interval</dt><dd id="d-interval">5 s</dd>
-        <dt>mask</dt><dd id="d-mask">crossfade</dd>
+        <dt>interval</dt><dd id="d-interval">1 s</dd>
+        <dt>mask</dt><dd id="d-mask">snow</dd>
         <dt>forecast</dt><dd id="d-forecast">—</dd>
         <dt>ball pos</dt><dd id="d-ballpos">—</dd>
         <dt>last flip</dt><dd id="d-flip">—</dd>

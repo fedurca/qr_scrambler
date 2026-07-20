@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="application-version" content="1.5.2" />
-  <title>v1.5.2 het68 QR</title>
+  <meta name="application-version" content="1.6.0" />
+  <title>v1.6.0 het68 QR</title>
   <style>
 :root {
   color-scheme: dark;
@@ -279,19 +279,12 @@ main {
   <section id="controls" aria-label="Nastavení">
     <label>
       Interval epochy (s)
-      <input id="epoch-interval" type="number" min="1" max="120" step="1" value="5" />
+      <input id="epoch-interval" type="number" min="1" max="120" step="1" value="1" />
     </label>
     <label>
       Maskování
       <select id="mask-method">
-        <option value="crossfade" selected>Crossfade</option>
-        <option value="balls">Koule</option>
-        <option value="shimmer">Shimmer</option>
-        <option value="softpatch">Měkká záplata</option>
-        <option value="snake">Snake</option>
-        <option value="tetris">Tetris</option>
-        <option value="life">Game of Life</option>
-        <option value="snow">Sněžení</option>
+        <option value="snow" selected>Sněžení</option>
         <option value="none">Žádné</option>
       </select>
     </label>
@@ -311,14 +304,14 @@ main {
     </header>
     <div class="body">
       <dl>
-        <dt>version</dt><dd id="d-version">1.5.2</dd>
+        <dt>version</dt><dd id="d-version">1.6.0</dd>
         <dt>engine</dt><dd id="d-engine">—</dd>
         <dt>source</dt><dd id="d-source">—</dd>
         <dt>decoder</dt><dd id="d-decoder">—</dd>
-        <dt>ecc / ver</dt><dd id="d-opts">L / 2</dd>
+        <dt>ecc / ver</dt><dd id="d-opts">H / 4</dd>
         <dt>render</dt><dd id="d-render">—</dd>
-        <dt>interval</dt><dd id="d-interval">5 s</dd>
-        <dt>mask</dt><dd id="d-mask">crossfade</dd>
+        <dt>interval</dt><dd id="d-interval">1 s</dd>
+        <dt>mask</dt><dd id="d-mask">snow</dd>
         <dt>forecast</dt><dd id="d-forecast">—</dd>
         <dt>ball pos</dt><dd id="d-ballpos">—</dd>
         <dt>last flip</dt><dd id="d-flip">—</dd>
@@ -10461,7 +10454,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
 });
   </script>
   <script>
-window.APP_VERSION="1.5.2";
+window.APP_VERSION="1.6.0";
 
   </script>
   <script>
@@ -12739,6 +12732,7 @@ window.APP_VERSION="1.5.2";
     this.margin = 2;
     this.cell = 0;       // device px per module
     this.maxInk = 20;    // max simultaneously overlaid modules (ECC-budget safe)
+    this.isReserved = null; // (row,col) -> bool: never ink function patterns
     this.state = null;
     this._loop = this.loop.bind(this);
   }
@@ -12787,6 +12781,7 @@ window.APP_VERSION="1.5.2";
     this.cell = this.canvas.width / n;
     var frac = MaskArcade.INK_FRAC[info.ecc] != null ? MaskArcade.INK_FRAC[info.ecc] : 0.05;
     this.maxInk = Math.max(5, Math.floor(this.size * this.size * frac));
+    this.isReserved = typeof info.reserved === "function" ? info.reserved : null;
     return true;
   };
 
@@ -12834,9 +12829,12 @@ window.APP_VERSION="1.5.2";
     this.raf = requestAnimationFrame(this._loop);
   };
 
-  /** Draw one module cell (module coords) as black. */
+  /** Draw one module cell (module coords) as black. Never inks reserved modules
+   *  (finders / timing / format / alignment) — those are structural and not
+   *  Reed-Solomon-correctable, so overlaying them would break detection. */
   MaskArcade.prototype.fillModule = function (col, row) {
     if (col < 0 || row < 0 || col >= this.size || row >= this.size) return;
+    if (this.isReserved && this.isReserved(row, col)) return;
     var px = (col + this.margin) * this.cell;
     var py = (row + this.margin) * this.cell;
     // Full-cell fill so it reads as a module (no gap seams against the code).
@@ -13028,8 +13026,12 @@ window.APP_VERSION="1.5.2";
         if (grid[i]) this.fillModule(i % this.size, (i / this.size) | 0);
       }
     } else if (this.mode === "snow") {
+      // Blink individual flakes so it reads as a glitchy/faulty render rather
+      // than tidy snow — cells wink on/off as they drift down the code.
       var fl = this.state.flakes;
-      for (i = 0; i < fl.length; i++) this.fillModule(fl[i].x, Math.floor(fl[i].y));
+      for (i = 0; i < fl.length; i++) {
+        if (Math.random() < 0.78) this.fillModule(fl[i].x, Math.floor(fl[i].y));
+      }
     }
   };
 
@@ -13342,27 +13344,24 @@ window.APP_VERSION="1.5.2";
   // to capacity (see computePadLen), so payload never overflows — the only cost
   // of higher EC/version is module density, offset by a larger DRAW_SIZE.
   //
-  // Measured avg flips at 1s cadence (epoch += 1) — full pipeline, jsQR-verified:
-  //   v2+L 15 (2.44%) · v6+M 26 (1.53%) · v5+Q 30 (2.22%) · v4+H 28 (2.57%) · v3+L 29 (3.44%)
-  // The dominant driver at 1s is Reed-Solomon diffusion: one changed epoch byte
-  // recomputes every EC codeword, so the floor is set by how few modules the
-  // symbol has. v2+L is the smallest symbol that still holds the payload, so it
-  // changes the FEWEST modules (~15 vs 28) and has the largest, most cheap-phone
-  // -readable modules. Trade-off: ECC-L has little reader headroom, so the in-QR
-  // arcade masks self-limit their ink (see mask-arcade). For the lowest CHANGE
-  // PERCENTAGE / smallest changed area instead, switch to { version: 6, ecc: "M" }
-  // (41x41, denser) or { version: 5, ecc: "Q" }.
-  var VERSION = 2;
-  var ECC = "L";
+  // Default masking is the "snow" glitch overlay, which inks black modules over
+  // the code. Those overlaid cells are errors the reader must correct, so the
+  // symbol needs Reed-Solomon headroom to stay scannable in EVERY frame — hence
+  // ECC "H" (v3+H does not fit the payload, so v4 is the smallest ECC-H option).
+  // Snow only inks NON-reserved data modules (see mask-arcade), which keeps
+  // decoding at ~100%. The snow flicker also camouflages the per-second change,
+  // so it "looks like the code is just faultily rendering".
+  var VERSION = 4;
+  var ECC = "H";
   var MARGIN = 2;
   var DRAW_SIZE = IS_MOBILE ? 260 : 300;
   var DECODE_SCALE = 4;
   /** Candidate profiles for the boot-time flip measurement (tuning aid only). */
   var GRID_PROFILES = [
-    { version: 2, ecc: "L" },
-    { version: 6, ecc: "M" },
+    { version: 4, ecc: "H" },
     { version: 5, ecc: "Q" },
-    { version: 4, ecc: "H" }
+    { version: 6, ecc: "M" },
+    { version: 2, ecc: "L" }
   ];
   var STABILIZE_BUDGET_MS = IS_MOBILE ? 350 : 500;
   var PREFETCH_BUDGET_MS = IS_MOBILE ? 550 : 800;
@@ -13414,10 +13413,10 @@ window.APP_VERSION="1.5.2";
     prefetch: null,
     renderMode: "none",
     paintEl: null,
-    epochIntervalSec: 5,
+    epochIntervalSec: 1,
     maskBalls: null,
     maskFx: null,
-    maskMethod: "crossfade",
+    maskMethod: "snow",
     pendingDiffs: null,
     forecastHorizon: 8,
     lastPlanSnap: null
@@ -13459,7 +13458,14 @@ window.APP_VERSION="1.5.2";
     var rect = getQrContentRect();
     if (!rect) return null;
     var size = state.prevModules ? moduleSize(state.prevModules) : (17 + 4 * VERSION);
-    return { rect: rect, size: size, margin: MARGIN, ecc: ECC };
+    var mods = state.prevModules;
+    return {
+      rect: rect,
+      size: size,
+      margin: MARGIN,
+      ecc: ECC,
+      reserved: mods ? function (r, c) { return moduleReserved(mods, r, c); } : null
+    };
   }
 
   function now() {
