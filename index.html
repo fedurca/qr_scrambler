@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="application-version" content="1.2.8" />
-  <title>v1.2.8 het68 QR</title>
+  <meta name="application-version" content="1.2.9" />
+  <title>v1.2.9 het68 QR</title>
   <style>
 :root {
   color-scheme: dark;
@@ -280,7 +280,7 @@ main {
     </header>
     <div class="body">
       <dl>
-        <dt>version</dt><dd id="d-version">1.2.8</dd>
+        <dt>version</dt><dd id="d-version">1.2.9</dd>
         <dt>engine</dt><dd id="d-engine">—</dd>
         <dt>source</dt><dd id="d-source">—</dd>
         <dt>decoder</dt><dd id="d-decoder">—</dd>
@@ -10430,7 +10430,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
 });
   </script>
   <script>
-window.APP_VERSION="1.2.8";
+window.APP_VERSION="1.2.9";
 
   </script>
   <script>
@@ -10549,6 +10549,12 @@ window.APP_VERSION="1.2.8";
   var COVER_TRAIL_MS = 50;
   /** Aim to arrive this early so HOLD window is non-empty. */
   var ARRIVE_EARLY_MS = 110;
+  /**
+   * Once a job is this close to flip (or already in trail), reassignment must
+   * not drop it — otherwise prefetch for N+1 abandons cover for flip N.
+   */
+  var JOB_LOCK_MIN_MS = 520;
+  var JOB_LOCK_MAX_MS = 1100;
   /** Unfold images / bounce depth for route search. */
   var AIM_LOOKAHEAD_BOUNCES = 8;
   var MAX_PLAN_BOUNCES = 3;
@@ -10994,6 +11000,20 @@ window.APP_VERSION="1.2.8";
     return targets;
   };
 
+  MaskBalls.prototype.jobLockLeadMs = function () {
+    var iv = this.intervalMs || 1000;
+    // Short intervals: lock almost the whole cycle so N+1 prefetch cannot steal cover.
+    return Math.max(JOB_LOCK_MIN_MS, Math.min(JOB_LOCK_MAX_MS, Math.floor(iv * 0.92)));
+  };
+
+  /** True while a job must survive reassignment (imminent flip or cover trail). */
+  MaskBalls.prototype.jobIsLocked = function (job, now) {
+    if (!job) return false;
+    var trail = job.trailMs != null ? job.trailMs : COVER_TRAIL_MS;
+    if (now > job.changeAtMs + trail) return false;
+    return now >= job.changeAtMs - this.jobLockLeadMs();
+  };
+
   MaskBalls.prototype.setForecast = function (events, meta) {
     if (!this.enabled) return;
     this.intervalMs = (meta && meta.intervalMs) || this.intervalMs || 1000;
@@ -11034,9 +11054,26 @@ window.APP_VERSION="1.2.8";
       this.pruneBallQueues(now);
       return;
     }
-    this.events = built;
+
+    // Merge by slot: keep still-active flips not present in this push (partial horizon)
+    var bySlot = {};
+    var prev = this.events || [];
+    for (i = 0; i < prev.length; i++) {
+      var pe = prev[i];
+      var pTrail = pe.trailMs != null ? pe.trailMs : COVER_TRAIL_MS;
+      if (pe.changeAtMs + pTrail > now - 30) bySlot[pe.slot] = pe;
+    }
+    for (i = 0; i < built.length; i++) {
+      bySlot[built[i].slot] = built[i];
+    }
+    var merged = [];
+    for (var sk in bySlot) {
+      if (Object.prototype.hasOwnProperty.call(bySlot, sk)) merged.push(bySlot[sk]);
+    }
+    merged.sort(function (a, b) { return a.changeAtMs - b.changeAtMs; });
+    this.events = merged;
     this.assignAndAim(now);
-    this.onLog("Mask forecast", this.forecastDebugPayload(built, now));
+    this.onLog("Mask forecast", this.forecastDebugPayload(merged, now));
     this.emitPlanDebug(now, true);
     this.startLoop();
   };
@@ -11188,8 +11225,19 @@ window.APP_VERSION="1.2.8";
       }
     }
 
+    var flipSlot = opts.slot;
     var balls = this.balls.map(function (b) {
       var job = b.queue && b.queue[0] ? b.queue[0] : null;
+      // Prefer a queued job matching this flip when reporting cover
+      if (flipSlot != null && b.queue && b.queue.length) {
+        for (var ji = 0; ji < b.queue.length; ji++) {
+          if (b.queue[ji].slot === flipSlot) {
+            job = b.queue[ji];
+            break;
+          }
+        }
+      }
+      var slotMismatch = !!(job && flipSlot != null && job.slot !== flipSlot);
       return {
         id: b.colorId,
         x: Math.round(b.x),
@@ -11200,6 +11248,8 @@ window.APP_VERSION="1.2.8";
         plan: b.planKind || null,
         job: job ? {
           slot: job.slot,
+          lock: !!job.locked,
+          mismatch: slotMismatch,
           tMs: Math.round(job.changeAtMs - now),
           x: Math.round(job.x),
           y: Math.round(job.y),
@@ -11710,11 +11760,43 @@ window.APP_VERSION="1.2.8";
     var job = ball.queue && ball.queue[0] ? ball.queue[0] : null;
     var trailMs = job && job.trailMs != null ? job.trailMs : COVER_TRAIL_MS;
 
-    // No job: leave QR / cruise
+    // No job: leave QR / cruise — but for short intervals stay near the code
+    // so the next assign has a chance (1s flips leave little travel time).
     if (!job) {
-      if (ball.needEvacuate || this.overlapsQr(ball, qr, QR_CLEAR_PAD)) {
+      var nextEv = null;
+      for (var nei = 0; nei < (this.events || []).length; nei++) {
+        var cand = this.events[nei];
+        if (cand.changeAtMs + (cand.trailMs != null ? cand.trailMs : COVER_TRAIL_MS) < now) continue;
+        if (!nextEv || cand.changeAtMs < nextEv.changeAtMs) nextEv = cand;
+      }
+      var soonMs = nextEv ? nextEv.changeAtMs - now : Infinity;
+      var stayNear = soonMs < (this.intervalMs || 1000) * 1.35;
+
+      if (stayNear) ball.needEvacuate = false;
+      if (!stayNear && (ball.needEvacuate || this.overlapsQr(ball, qr, QR_CLEAR_PAD))) {
         this.evacuateFromQr(ball);
         if (!this.overlapsQr(ball, qr, QR_CLEAR_PAD)) ball.needEvacuate = false;
+      } else if (stayNear && qr && !this.overlapsQr(ball, qr, QR_CLEAR_PAD + 40)) {
+        // Soft approach toward QR band via next bounce only (no teleport)
+        ball.evacuating = false;
+        ball.needEvacuate = false;
+        ball.targetSpeed = clamp(BASE_SPEED * 1.15, MIN_SPEED, MAX_SPEED);
+        var cx = qr.left + qr.width / 2;
+        var cy = qr.top + qr.height / 2;
+        var probeIdle = {
+          x: ball.x,
+          y: ball.y,
+          vx: ball.vx,
+          vy: ball.vy,
+          r: BALL_R,
+          speed: ball.speed
+        };
+        var nbIdle = this.nextBounce(probeIdle, 12);
+        if (nbIdle) {
+          ball.pendingAngle = Math.atan2(cy - nbIdle.y, cx - nbIdle.x);
+          ball.postSpeed = clamp(BASE_SPEED * 1.2, MIN_SPEED, MAX_SPEED);
+        }
+        ball.planKind = "orbit";
       } else {
         ball.evacuating = false;
         ball.needEvacuate = false;
@@ -11822,36 +11904,136 @@ window.APP_VERSION="1.2.8";
     return true;
   };
 
-  MaskBalls.prototype.assignAndAim = function (now) {
-    // Preserve continuous flight: only rewrite queues / aim / targetSpeed — never x,y,r
-    for (var i = 0; i < this.balls.length; i++) {
-      this.balls[i].queue = [];
-      this.balls[i].covering = false;
+  /** Match a locked job to the nearest event target so we do not double-assign. */
+  MaskBalls.prototype.markLockedTarget = function (ev, job) {
+    if (!ev || !ev.targets || !job) return null;
+    var best = null;
+    var bestD = Infinity;
+    for (var i = 0; i < ev.targets.length; i++) {
+      var t = ev.targets[i];
+      if (t.assigned) continue;
+      var d = hypot(t.x - job.x, t.y - job.y);
+      if (d < bestD) {
+        bestD = d;
+        best = t;
+      }
     }
+    if (best && bestD <= Math.max(BALL_R * 1.35, (job.r || 0) + 24)) {
+      best.assigned = job.ballId || true;
+      return best;
+    }
+    return null;
+  };
 
+  MaskBalls.prototype.assignAndAim = function (now) {
+    // Preserve continuous flight: never teleport x,y,r.
+    // Keep locked jobs (current / imminent flip) — only rewrite future unlocked work.
     var planFor = {};
     var assignments = [];
+    var lockedCount = 0;
+    var self = this;
 
-    // Prefer sooner slots first so near-term flips get the best balls
+    for (var i = 0; i < this.balls.length; i++) {
+      var ball = this.balls[i];
+      var kept = [];
+      var oldQ = ball.queue || [];
+      for (var qi = 0; qi < oldQ.length; qi++) {
+        var oldJob = oldQ[qi];
+        var trail = oldJob.trailMs != null ? oldJob.trailMs : COVER_TRAIL_MS;
+        if (now > oldJob.changeAtMs + trail) continue;
+        if (this.jobIsLocked(oldJob, now)) {
+          oldJob.locked = true;
+          oldJob.ballId = ball.colorId;
+          kept.push(oldJob);
+          lockedCount++;
+        }
+      }
+      ball.queue = kept;
+    }
+
+    // Prefer sooner slots; for short intervals only plan the nearest 1–2 flips ahead
     var events = this.events.slice().sort(function (a, b) {
       return a.changeAtMs - b.changeAtMs;
     });
+    var iv = this.intervalMs || 1000;
+    var maxAhead = iv <= 1500 ? 2 : (iv <= 3000 ? 3 : 5);
+    var horizonMs = iv * maxAhead + 80;
+    events = events.filter(function (ev) {
+      var eTrail = ev.trailMs != null ? ev.trailMs : COVER_TRAIL_MS;
+      if (now >= ev.changeAtMs - self.jobLockLeadMs()) return true;
+      if (now > ev.changeAtMs + eTrail) return false;
+      return ev.changeAtMs - now <= horizonMs;
+    });
+
+    // Remap locked jobs onto current event targets (same slot)
+    for (i = 0; i < this.balls.length; i++) {
+      ball = this.balls[i];
+      for (qi = 0; qi < ball.queue.length; qi++) {
+        var lj = ball.queue[qi];
+        var evMatch = null;
+        for (var ei0 = 0; ei0 < events.length; ei0++) {
+          if (events[ei0].slot === lj.slot ||
+              Math.abs(events[ei0].changeAtMs - lj.changeAtMs) < 80) {
+            evMatch = events[ei0];
+            break;
+          }
+        }
+        var mt = this.markLockedTarget(evMatch, lj);
+        if (mt) {
+          lj.x = mt.x;
+          lj.y = mt.y;
+          lj.r = mt.r;
+          lj.changeAtMs = evMatch.changeAtMs;
+          lj.slot = evMatch.slot;
+          lj.cells = (mt.cells || []).map(function (c) {
+            return [c.row, c.col];
+          });
+        }
+        assignments.push({
+          slot: lj.slot,
+          inMs: Math.round(lj.changeAtMs - now),
+          ball: ball.colorId,
+          x: Math.round(lj.x),
+          y: Math.round(lj.y),
+          n: (lj.cells && lj.cells.length) || 0,
+          kind: "locked",
+          miss: Math.round(hypot(ball.x - lj.x, ball.y - lj.y)),
+          bounces: null,
+          sp: Math.round(ball.targetSpeed || ball.speed),
+          post: null
+        });
+        if (planFor[i] == null || lj.changeAtMs < planFor[i].job.changeAtMs) {
+          var lockPlan = this.planIntercept(ball, lj, lj.changeAtMs, now) || {
+            pendingAngle: null,
+            targetSpeed: Math.min(MAX_SPEED, Math.max(MIN_SPEED, ball.speed)),
+            score: 0,
+            kind: "locked",
+            miss: hypot(ball.x - lj.x, ball.y - lj.y)
+          };
+          planFor[i] = { job: lj, plan: lockPlan };
+        }
+      }
+    }
 
     for (var ei = 0; ei < events.length; ei++) {
       var ev = events[ei];
-      // Larger clusters first within a slot
       var targets = ev.targets.slice().sort(function (a, b) {
         return (b.count || 0) - (a.count || 0);
       });
       for (var ti = 0; ti < targets.length; ti++) {
         var target = targets[ti];
+        if (target.assigned) continue;
         var chosen = null;
         var chosenPlan = null;
         var chosenScore = Infinity;
 
         for (var bi = 0; bi < this.balls.length; bi++) {
-          var ball = this.balls[bi];
+          ball = this.balls[bi];
           if (!this.ballFreeFor(ball, ev.changeAtMs, ev.leadMs, ev.trailMs)) continue;
+          var hasLocked = false;
+          for (qi = 0; qi < (ball.queue || []).length; qi++) {
+            if (ball.queue[qi].locked) { hasLocked = true; break; }
+          }
 
           var plan = null;
           var score;
@@ -11869,14 +12051,16 @@ window.APP_VERSION="1.2.8";
             if (!plan) continue;
             score = plan.score + 20;
           }
-          // Prefer free balls / fewer queued jobs for later horizon steps
           score += (ball.queue.length || 0) * 12;
-          // Hard preference: predicted miss at arrive time
+          if (hasLocked) score += 28;
           if (plan.miss != null) score += plan.miss * 1.1;
           else score += 500;
           if (plan.kind === "late" || plan.kind === "rush") score += 350;
-          // Prefer balls already nearer the target disc
           score += hypot(ball.x - target.x, ball.y - target.y) * 0.08;
+          if (ev.changeAtMs - now < (this.intervalMs || 1000) * 1.15) {
+            if (plan.kind === "late" || plan.kind === "rush") score += 220;
+            else score -= 35;
+          }
           if (score < chosenScore) {
             chosenScore = score;
             chosen = bi;
@@ -11896,6 +12080,8 @@ window.APP_VERSION="1.2.8";
             y: target.y,
             r: target.r,
             slot: ev.slot,
+            locked: this.jobIsLocked({ changeAtMs: ev.changeAtMs, trailMs: ev.trailMs }, now),
+            ballId: ball.colorId,
             cells: (target.cells || []).map(function (c) {
               return [c.row, c.col];
             })
@@ -11948,6 +12134,7 @@ window.APP_VERSION="1.2.8";
     this.onLog("Mask assign", {
       n: assignments.length,
       hits: assignments.filter(function (a) { return a.ball; }).length,
+      locked: lockedCount,
       rows: assignments.slice(0, 24)
     });
   };
