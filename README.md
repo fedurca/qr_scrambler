@@ -109,7 +109,7 @@ Po změně zdrojů vždy znovu `npm run build` a nasaď aktualizovaný `index.ht
 
 ### GitHub Pages (autodeploy)
 
-Po každém pushi na `main` (nebo ručně přes **Actions → Deploy GitHub Pages**) CI:
+Po každém pushi na `main` (nebo ručně přes **Actions → Deploy GitHub Pages → Run workflow**) CI:
 
 1. spustí `npm run build`
 2. nasadí self-contained `index.html` na GitHub Pages
@@ -122,7 +122,13 @@ Veřejná URL (project site):
 https://fedurca.github.io/qr_scrambler/
 ```
 
-Nastavení v GitHubu: **Settings → Pages → Build and deployment → Source: GitHub Actions** (workflow to při prvním běhu obvykle zapne samo). Query parametry fungují beze změny, např. `https://fedurca.github.io/qr_scrambler/?rate=10&mask=snow2`.
+**Jednorázově** (owner/admin) zapni Pages:
+
+1. otevři [Settings → Pages](https://github.com/fedurca/qr_scrambler/settings/pages)
+2. **Build and deployment → Source: GitHub Actions**
+3. znovu spusť workflow (**Actions → Deploy GitHub Pages → Re-run** nebo prázdný commit / `workflow_dispatch`)
+
+Query parametry fungují beze změny, např. `https://fedurca.github.io/qr_scrambler/?rate=10&mask=snow2`.
 
 Modulární vývoj: `app.html` + `css/` + `js/` + `vendor/`.
 

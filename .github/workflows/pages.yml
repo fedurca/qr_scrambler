@@ -1,4 +1,8 @@
 # Build self-contained index.html and publish to GitHub Pages on every main push.
+#
+# One-time repo setup (owner/admin):
+#   Settings → Pages → Build and deployment → Source: GitHub Actions
+# Then re-run this workflow. Site: https://fedurca.github.io/qr_scrambler/
 name: Deploy GitHub Pages
 
 on:
