@@ -32,6 +32,7 @@
     this.getGentleCells = opts.getGentleCells || function () { return []; };
     this.getHorizon = opts.getHorizon || function () { return 1; };
     this.getNoiseAmount = opts.getNoiseAmount || function () { return 0.5; };
+    this.getChangeAmount = opts.getChangeAmount || function () { return 0.7; };
     this.mode = null;
     this.canvas = null;
     this.ctx = null;
@@ -339,6 +340,15 @@
     return a;
   };
 
+  /** Fraction (0..1) of next-iteration change cells to randomly preview/blink. */
+  MaskArcade.prototype.changeFrac = function () {
+    var a = this.getChangeAmount ? this.getChangeAmount() : 0.7;
+    if (!isFinite(a)) a = 0.7;
+    if (a < 0) a = 0;
+    if (a > 1) a = 1;
+    return a;
+  };
+
   MaskArcade.prototype.horizonNow = function (fallback) {
     var h = this.getHorizon ? (this.getHorizon() | 0) : 0;
     if (h < 1) h = fallback | 0;
@@ -628,25 +638,40 @@
       sel.push([r, c]);
     }
     var addBound = add.bind(this);
-    // Priority 1: a random blinking subset of the cells that will change.
+    // Priority 1: random subset of cells that will change next iteration(s).
+    // "Změny %" = which fraction of the forecast change set is eligible; then
+    // still clamped by chgCap / perFrameCap so every frame stays readable.
     // v6 (camouflage) shows ~half changes / half stable so they look identical;
     // v8 (static) lets the dense decoys dominate. Others favour the changes.
+    var changeAmt = this.changeFrac();
     var chgCap;
-    if (st.gentle) chgCap = Math.max(2, Math.floor(inkBudget * 0.5));
-    else if (st.variant === 1) chgCap = inkBudget;
-    else if (st.variant === 6) chgCap = Math.floor(inkBudget * 0.45);
-    else if (st.variant === 8) chgCap = Math.floor(inkBudget * 0.35);
-    else chgCap = Math.ceil(inkBudget * (0.45 + 0.2 * (1 - noise)));
+    if (changeAmt <= 0) {
+      chgCap = 0;
+    } else if (st.gentle) {
+      chgCap = Math.max(2, Math.floor(inkBudget * 0.5));
+    } else if (st.variant === 1) {
+      chgCap = inkBudget;
+    } else if (st.variant === 6) {
+      chgCap = Math.floor(inkBudget * 0.45);
+    } else if (st.variant === 8) {
+      chgCap = Math.floor(inkBudget * 0.35);
+    } else {
+      chgCap = Math.ceil(inkBudget * (0.45 + 0.2 * (1 - noise)));
+    }
     // Gentle mode: draw from the FRONT of the list (least-differing cells), only
     // lightly rotated, so the previewed set stays the subtlest possible.
     var chg;
     if (st.gentle) chg = changing.slice(0, Math.max(chgCap * 3, 12));
     else chg = changing.slice();
     for (var s = chg.length - 1; s > 0; s--) { var j = (Math.random() * (s + 1)) | 0; var t = chg[s]; chg[s] = chg[j]; chg[j] = t; }
-    var blinkP = st.gentle ? 0.55 : 0.72;
+    // Random % of the forecast change set is eligible; ink at most chgCap of them.
+    var eligible = Math.max(0, Math.round(chg.length * changeAmt));
+    if (changeAmt > 0 && chg.length > 0 && eligible < 1) eligible = 1;
+    chg = chg.slice(0, eligible);
     var cc = 0;
     for (var i = 0; i < chg.length && cc < chgCap; i++) {
-      if (Math.random() < blinkP) { addBound(chg[i][0], chg[i][1]); cc++; }
+      addBound(chg[i][0], chg[i][1]);
+      cc++;
     }
     // Priority 2: anti-pattern decoys fill the remaining budget (scaled by noise %).
     var decoyBudget = Math.max(0, inkBudget - sel.length);

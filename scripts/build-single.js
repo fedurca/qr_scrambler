@@ -53,6 +53,10 @@ ${css}
       <input id="noise-amount" type="number" min="0" max="100" step="1" value="50" title="Množství maskovacího šumu (0 = jen změny, 100 = plný cap)" />
     </label>
     <label>
+      Změny %
+      <input id="change-pct" type="number" min="0" max="100" step="1" value="70" title="Náhodný podíl buněk z příští iterace, které se předblikávají (0 = žádné, 100 = všechny až do čitelného capu)" />
+    </label>
+    <label>
       Maskování
       <select id="mask-method">
         <option value="snow3" selected>Změny + sníh</option>
@@ -99,6 +103,7 @@ ${css}
         <dt>FPS min/avg/max</dt><dd id="d-fps">—</dd>
         <dt>lookup</dt><dd id="d-lookup">6</dd>
         <dt>noise</dt><dd id="d-noise">50%</dd>
+        <dt>change %</dt><dd id="d-changepct">70%</dd>
         <dt>rec</dt><dd id="d-rec">5 s</dd>
         <dt>settings URL</dt><dd id="d-settings">—</dd>
         <dt>mask</dt><dd id="d-mask">snow3</dd>
