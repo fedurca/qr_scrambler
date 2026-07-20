@@ -24,18 +24,23 @@
     { id: "K", group: "cmyk", hex: "#3a3a3a", rgb: [58, 58, 58] }
   ];
 
-  var BALL_R = 54;
+  var BALL_R = 58;
   var MIN_SPEED = 160;
-  var MAX_SPEED = 900;
-  var BASE_SPEED = 300;
+  var MAX_SPEED = 980;
+  var BASE_SPEED = 320;
   var SPEED_JITTER = 50;
-  var MAX_ACCEL = 1200; // px/s² — linear speed changes only
-  var COVER_LEAD_MS = 120;
-  var COVER_TRAIL_MS = 120;
+  var MAX_ACCEL = 1500; // px/s² — linear speed changes only
+  /** Start intercept early so the ball is on-station before the flip. */
+  var COVER_LEAD_MS = 200;
+  /** Must be geometrically covering this long before the flip. */
+  var COVER_HOLD_MS = 80;
+  /** Leave almost immediately once the flip is done. */
+  var COVER_TRAIL_MS = 32;
   var AIM_LOOKAHEAD_BOUNCES = 5;
   var MAX_TARGETS = 7;
   /** Cluster disc must fit inside the ball so a centered hit fully covers modules. */
-  var MAX_TARGET_R = BALL_R - 6;
+  var MAX_TARGET_R = BALL_R - 8;
+  var QR_CLEAR_PAD = 28;
 
   function clamp(v, a, b) {
     return Math.max(a, Math.min(b, v));
@@ -394,7 +399,7 @@
       return;
     }
 
-    var coverMs = clamp(this.intervalMs * 0.1, COVER_LEAD_MS, 220);
+    var coverMs = COVER_HOLD_MS + COVER_TRAIL_MS;
     var leadMs = COVER_LEAD_MS;
     var trailMs = COVER_TRAIL_MS;
     var now = Date.now();
@@ -456,11 +461,111 @@
 
   MaskBalls.prototype.notifyChanged = function () {
     var now = Date.now();
+    // Flip already painted → cut trail to minimum and evacuate after it
+    for (var i = 0; i < this.balls.length; i++) {
+      var ball = this.balls[i];
+      var q = ball.queue || [];
+      for (var j = 0; j < q.length; j++) {
+        if (q[j].changeAtMs <= now + 5) {
+          q[j].trailMs = Math.min(q[j].trailMs != null ? q[j].trailMs : COVER_TRAIL_MS, COVER_TRAIL_MS);
+          q[j].evacuateAfter = true;
+        }
+      }
+    }
     this.events = this.events.filter(function (ev) {
       var trail = ev.trailMs != null ? ev.trailMs : COVER_TRAIL_MS;
       return ev.changeAtMs + trail > now - 20;
     });
     this.pruneBallQueues(now);
+  };
+
+  MaskBalls.prototype.overlapsQr = function (ball, qr, pad) {
+    if (!qr) return false;
+    var p = pad != null ? pad : QR_CLEAR_PAD;
+    return (
+      ball.x + ball.r > qr.left - p &&
+      ball.x - ball.r < qr.left + qr.width + p &&
+      ball.y + ball.r > qr.top - p &&
+      ball.y - ball.r < qr.top + qr.height + p
+    );
+  };
+
+  /** True if current heading leaves the QR band within maxT seconds. */
+  MaskBalls.prototype.headingClearsQr = function (ball, qr, maxT) {
+    if (!qr || !this.overlapsQr(ball, qr, QR_CLEAR_PAD)) return true;
+    var sp = hypot(ball.vx, ball.vy) || ball.speed;
+    if (sp < 1) return false;
+    var steps = 12;
+    var dt = maxT / steps;
+    var x = ball.x;
+    var y = ball.y;
+    var vx = ball.vx;
+    var vy = ball.vy;
+    for (var i = 0; i < steps; i++) {
+      x += vx * dt;
+      y += vy * dt;
+      var ghost = { x: x, y: y, r: ball.r };
+      if (!this.overlapsQr(ghost, qr, QR_CLEAR_PAD)) return true;
+    }
+    return false;
+  };
+
+  /**
+   * After a mask job: leave the QR area ASAP using only bounce-angle + linear speed.
+   */
+  MaskBalls.prototype.evacuateFromQr = function (ball) {
+    var qr = this.getQrRect() || this.qrRect;
+    if (!qr || !this.overlapsQr(ball, qr, QR_CLEAR_PAD)) {
+      ball.evacuating = false;
+      if (!ball.queue || !ball.queue.length) {
+        ball.targetSpeed = clamp(BASE_SPEED, MIN_SPEED, MAX_SPEED);
+      }
+      return;
+    }
+    ball.evacuating = true;
+    ball.targetSpeed = MAX_SPEED;
+
+    if (this.headingClearsQr(ball, qr, 0.55)) {
+      return;
+    }
+
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    var cx = qr.left + qr.width / 2;
+    var cy = qr.top + qr.height / 2;
+    var edges = [
+      { x: ball.r + 6, y: clamp(ball.y, ball.r + 6, h - ball.r - 6) },
+      { x: w - ball.r - 6, y: clamp(ball.y, ball.r + 6, h - ball.r - 6) },
+      { x: clamp(ball.x, ball.r + 6, w - ball.r - 6), y: ball.r + 6 },
+      { x: clamp(ball.x, ball.r + 6, w - ball.r - 6), y: h - ball.r - 6 }
+    ];
+    // Prefer edge points far from QR center (clear of the code)
+    var best = edges[0];
+    var bestScore = -Infinity;
+    for (var i = 0; i < edges.length; i++) {
+      var e = edges[i];
+      var ghost = { x: e.x, y: e.y, r: ball.r };
+      var clear = !this.overlapsQr(ghost, qr, QR_CLEAR_PAD + 10);
+      var score = hypot(e.x - cx, e.y - cy) + (clear ? 400 : 0) - hypot(e.x - ball.x, e.y - ball.y) * 0.25;
+      if (score > bestScore) {
+        bestScore = score;
+        best = e;
+      }
+    }
+
+    var probe = {
+      x: ball.x,
+      y: ball.y,
+      vx: ball.vx,
+      vy: ball.vy,
+      r: ball.r,
+      speed: ball.speed
+    };
+    var nb = this.nextBounce(probe, 10);
+    if (nb) {
+      ball.pendingAngle = Math.atan2(best.y - nb.y, best.x - nb.x);
+      ball.postSpeed = MAX_SPEED;
+    }
   };
 
   MaskBalls.prototype.nextBounce = function (ball, maxT) {
@@ -625,17 +730,77 @@
     return candidates[0];
   };
 
-  /** Per-frame refine: update speed / pending bounce angle for the soonest job. */
+  /** Per-frame refine: intercept only when due → brief cover → evacuate QR. */
   MaskBalls.prototype.refineAim = function (ball, now) {
-    if (!ball.queue || !ball.queue.length) return;
-    var job = ball.queue[0];
-    if (now > job.changeAtMs + (job.trailMs || COVER_TRAIL_MS)) return;
+    var qr = this.getQrRect() || this.qrRect;
+
+    // Drop finished mask jobs
+    while (ball.queue && ball.queue.length) {
+      var head = ball.queue[0];
+      var trail = head.trailMs != null ? head.trailMs : COVER_TRAIL_MS;
+      if (now > head.changeAtMs + trail) {
+        ball.queue.shift();
+        ball.needEvacuate = true;
+        continue;
+      }
+      break;
+    }
+
+    var job = ball.queue && ball.queue[0] ? ball.queue[0] : null;
+    var msToNext = job ? job.changeAtMs - now : Infinity;
+    // Dynamic approach window: just enough travel time + slack, then leave again after flip
+    var approachMs = COVER_LEAD_MS + 100;
+    if (job) {
+      var travelPx = hypot(ball.x - job.x, ball.y - job.y);
+      var needMs = (travelPx / Math.max(MIN_SPEED, MAX_SPEED * 0.85)) * 1000 + 220;
+      approachMs = clamp(needMs, COVER_LEAD_MS + 80, 1600);
+    }
+    var coverImminent = job && msToNext <= approachMs;
+
+    // Past flip (or job finished) → leave QR immediately unless next cover is imminent
+    if (
+      ball.needEvacuate ||
+      (job && now >= job.changeAtMs + (job.trailMs != null ? job.trailMs : COVER_TRAIL_MS)) ||
+      (job && job.evacuateAfter && now >= job.changeAtMs + (job.trailMs || COVER_TRAIL_MS))
+    ) {
+      ball.needEvacuate = true;
+    }
+
+    if (ball.needEvacuate && !coverImminent) {
+      this.evacuateFromQr(ball);
+      if (!this.overlapsQr(ball, qr, QR_CLEAR_PAD)) ball.needEvacuate = false;
+      return;
+    }
+
+    if (!job || !coverImminent) {
+      if (this.overlapsQr(ball, qr, QR_CLEAR_PAD)) {
+        this.evacuateFromQr(ball);
+      } else {
+        ball.evacuating = false;
+        ball.needEvacuate = false;
+        if (!job) {
+          ball.targetSpeed = clamp(BASE_SPEED + (Math.random() * 2 - 1) * 25, MIN_SPEED, MAX_SPEED);
+        }
+      }
+      return;
+    }
+
+    // Cover imminent: intercept target. Once on disc after changeAt → evacuate.
+    if (now >= job.changeAtMs) {
+      var dist = hypot(ball.x - job.x, ball.y - job.y);
+      if (dist + job.r <= ball.r + 1 || now >= job.changeAtMs + (job.trailMs || COVER_TRAIL_MS)) {
+        ball.needEvacuate = true;
+        this.evacuateFromQr(ball);
+        return;
+      }
+    }
+
     var plan = this.planIntercept(ball, job, job.changeAtMs, now);
     if (!plan) {
-      // Not on track and no bounce in time → sprint to a wall for an angle change
       ball.targetSpeed = MAX_SPEED;
       return;
     }
+    ball.evacuating = false;
     ball.targetSpeed = plan.targetSpeed;
     if (plan.postSpeed != null) ball.postSpeed = plan.postSpeed;
     if (plan.pendingAngle != null) ball.pendingAngle = plan.pendingAngle;
@@ -944,11 +1109,11 @@
       var q = ball.queue || [];
       for (var qi = 0; qi < q.length; qi++) {
         var a = q[qi];
-        var lead = a.leadMs != null ? a.leadMs : COVER_LEAD_MS;
         var trail = a.trailMs != null ? a.trailMs : COVER_TRAIL_MS;
-        if (now < a.changeAtMs - lead || now > a.changeAtMs + trail) continue;
+        // Tight station window around the flip (not the whole approach lead)
+        if (now < a.changeAtMs - COVER_HOLD_MS || now > a.changeAtMs + trail) continue;
         var dist = hypot(ball.x - a.x, ball.y - a.y);
-        if (dist + a.r <= ball.r + 2) covering = true;
+        if (dist + a.r <= ball.r + 1) covering = true;
       }
       ball.covering = covering;
     }
