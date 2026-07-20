@@ -32,6 +32,11 @@ body {
   padding: 72px 16px 96px;
 }
 
+/* Fallback clearance for the fixed controls bar (JS refines it precisely). */
+@media (max-width: 560px) {
+  body { padding-top: 124px; }
+}
+
 #controls {
   position: fixed;
   top: 0;
