@@ -17,12 +17,16 @@
 (function (global) {
   "use strict";
 
-  var STEP_MS = { snake: 110, tetris: 130, life: 160, snow: 120 };
+  var STEP_MS = {
+    snake: 110, tetris: 130, life: 160, snow: 120,
+    snow1: 100, snow2: 100, snow3: 110, snow4: 100, snow5: 90
+  };
   var INK = "#000000";
 
   function MaskArcade(opts) {
     opts = opts || {};
     this.getQrInfo = opts.getQrInfo || function () { return null; };
+    this.getChangingCells = opts.getChangingCells || function () { return []; };
     this.mode = null;
     this.canvas = null;
     this.ctx = null;
@@ -38,12 +42,15 @@
     this._loop = this.loop.bind(this);
   }
 
-  MaskArcade.MODES = ["snake", "tetris", "life", "snow"];
+  MaskArcade.MODES = ["snake", "tetris", "life", "snow", "snow1", "snow2", "snow3", "snow4", "snow5"];
+  MaskArcade.FLICKER = ["snow1", "snow2", "snow3", "snow4", "snow5"];
 
   // Safe overlaid-module fraction by ECC level: the reader must still correct the
   // overlaid cells as errors, so keep well under floor(EC/2). Roughly half the
   // overlaid cells fall on already-dark modules (free), so these are conservative.
   MaskArcade.INK_FRAC = { L: 0.008, M: 0.035, Q: 0.06, H: 0.10 };
+  // Guaranteed-readable per-frame cap fraction (worst case: all ink on white).
+  MaskArcade.CAP_FRAC = { L: 0.005, M: 0.008, Q: 0.010, H: 0.013 };
 
   MaskArcade.prototype.ensureCanvas = function () {
     if (this.canvas) return this.canvas;
@@ -82,6 +89,10 @@
     this.cell = this.canvas.width / n;
     var frac = MaskArcade.INK_FRAC[info.ecc] != null ? MaskArcade.INK_FRAC[info.ecc] : 0.05;
     this.maxInk = Math.max(5, Math.floor(this.size * this.size * frac));
+    // Hard per-frame ink cap that keeps decoding at ~100% even if every inked
+    // cell were a real error (white module). Calibrated: v4+H stays 100% <= 14.
+    var capFrac = MaskArcade.CAP_FRAC[info.ecc] != null ? MaskArcade.CAP_FRAC[info.ecc] : 0.008;
+    this.perFrameCap = Math.max(4, Math.min(16, Math.floor(this.size * this.size * capFrac)));
     this.isReserved = typeof info.reserved === "function" ? info.reserved : null;
     return true;
   };
@@ -106,6 +117,7 @@
     if (mode === "snake") this.state = this.newSnake();
     else if (mode === "tetris") this.state = this.newTetris();
     else if (mode === "life") this.state = this.newLife();
+    else if (MaskArcade.FLICKER.indexOf(mode) >= 0) this.state = this.newFlicker(mode);
     else this.state = this.newSnow();
     this.lastStep = 0;
     this.raf = requestAnimationFrame(this._loop);
@@ -124,6 +136,7 @@
       if (this.mode === "snake") this.stepSnake();
       else if (this.mode === "tetris") this.stepTetris();
       else if (this.mode === "life") this.stepLife();
+      else if (MaskArcade.FLICKER.indexOf(this.mode) >= 0) this.stepFlicker();
       else this.stepSnow();
       this.draw();
     }
@@ -305,9 +318,95 @@
     }
   };
 
+  // ---- Change-preview flicker (5 variants) -------------------------------
+  // Blink the modules that will flip next iteration (from the forecast) so the
+  // real change blends into ongoing flicker; each variant adds different decoys.
+  // Never exceeds perFrameCap inked cells → always decodable.
+  MaskArcade.prototype.newFlicker = function (mode) {
+    var v = parseInt(mode.slice(4), 10) || 1;
+    var flakes = [];
+    if (v === 3) {
+      var n = Math.max(4, (this.size * 0.35) | 0);
+      for (var i = 0; i < n; i++) flakes.push({ x: (Math.random() * this.size) | 0, y: Math.random() * this.size, v: 0.5 + Math.random() });
+    }
+    return { variant: v, scanRow: 0, flakes: flakes };
+  };
+
+  MaskArcade.prototype.stepFlicker = function () {
+    var st = this.state;
+    if (st.variant === 5) st.scanRow = (st.scanRow + 1) % this.size;
+    if (st.variant === 3) {
+      for (var i = 0; i < st.flakes.length; i++) {
+        var f = st.flakes[i];
+        f.y += f.v;
+        if (f.y >= this.size) { f.y = -Math.random() * 2; f.x = (Math.random() * this.size) | 0; f.v = 0.5 + Math.random(); }
+      }
+    }
+  };
+
+  MaskArcade.prototype.randCell = function () {
+    return [(Math.random() * this.size) | 0, (Math.random() * this.size) | 0];
+  };
+
+  /** Decoy cells (module [row,col]) for the current variant. */
+  MaskArcade.prototype.decoysFor = function (st, changing) {
+    var out = [];
+    var i, n;
+    if (st.variant === 1) {
+      return out; // changes only
+    } else if (st.variant === 2) {
+      n = Math.ceil(this.perFrameCap * 0.6);
+      for (i = 0; i < n; i++) out.push(this.randCell()); // scattered noise
+    } else if (st.variant === 3) {
+      for (i = 0; i < st.flakes.length; i++) out.push([Math.floor(st.flakes[i].y), st.flakes[i].x]); // falling snow
+    } else if (st.variant === 4) {
+      // halo: neighbours of changing cells
+      for (i = 0; i < changing.length; i++) {
+        var dr = (Math.random() * 3 | 0) - 1, dc = (Math.random() * 3 | 0) - 1;
+        out.push([changing[i][0] + dr, changing[i][1] + dc]);
+      }
+      if (!changing.length) { for (i = 0; i < this.perFrameCap; i++) out.push(this.randCell()); }
+    } else if (st.variant === 5) {
+      for (var c = 0; c < this.size; c++) out.push([st.scanRow, c]); // scanline
+    }
+    return out;
+  };
+
+  MaskArcade.prototype.drawFlicker = function () {
+    this.beginInk();
+    var st = this.state;
+    var cap = this.perFrameCap;
+    var changing = this.getChangingCells() || [];
+    var seen = {};
+    var sel = [];
+    function add(r, c) {
+      if (r < 0 || c < 0) return;
+      var k = r + "," + c;
+      if (seen[k]) return;
+      seen[k] = 1;
+      sel.push([r, c]);
+    }
+    // Priority 1: a random blinking subset of the cells that will change.
+    var chgCap = st.variant === 1 ? cap : Math.ceil(cap * 0.65);
+    var chg = changing.slice();
+    for (var s = chg.length - 1; s > 0; s--) { var j = (Math.random() * (s + 1)) | 0; var t = chg[s]; chg[s] = chg[j]; chg[j] = t; }
+    var cc = 0;
+    for (var i = 0; i < chg.length && cc < chgCap; i++) {
+      if (Math.random() < 0.72) { add(chg[i][0], chg[i][1]); cc++; }
+    }
+    // Priority 2: variant decoys fill the remaining budget.
+    var decoys = this.decoysFor(st, changing);
+    for (var d = decoys.length - 1; d > 0; d--) { var q = (Math.random() * (d + 1)) | 0; var u = decoys[d]; decoys[d] = decoys[q]; decoys[q] = u; }
+    for (i = 0; i < decoys.length && sel.length < cap; i++) add(decoys[i][0], decoys[i][1]);
+    // Fallback so it never looks dead before the first forecast arrives.
+    while (sel.length < Math.min(6, cap) && (changing.length === 0)) { var rc = this.randCell(); add(rc[0], rc[1]); }
+    for (i = 0; i < sel.length; i++) this.fillModule(sel[i][1], sel[i][0]);
+  };
+
   // ---- Draw --------------------------------------------------------------
   MaskArcade.prototype.draw = function () {
     if (!this.ctx || !this.size) return;
+    if (MaskArcade.FLICKER.indexOf(this.mode) >= 0) return this.drawFlicker();
     this.beginInk();
     var i;
     if (this.mode === "snake") {

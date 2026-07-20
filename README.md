@@ -47,20 +47,24 @@ Hard floor: dvě různá QR data musí ležet v různých RS codeword basins; po
 
 ## Maskování změny (aby nebyla vidět)
 
-Výběr metody v UI (`Maskování`), default **sněžení**:
+Výběr metody v UI (`Maskování`), default **Změny + sníh**. Všech 5 variant **předblikává právě ty moduly, které se v příští iteraci změní** (z forecastu), takže reálná sekundová změna splyne s probliknutím a vypadá to jako vadný render. Liší se přidanými „návnadami":
 
-| metoda | popis |
+| varianta | popis |
 | --- | --- |
-| **sněžení** (default) | černé, na moduly zarovnané „vločky" padají a **problikávají** přes kód (`js/mask-arcade.js`) — vypadá to, jako by se kód jen vadně renderoval. Inkoustí jen **ne-rezervované datové moduly** (nikdy findery/timing/format) a drží se v rámci RS rezervy, takže kód je čitelný v **každém** snímku; problikávání zároveň maskuje sekundovou změnu |
+| **Jen změny** (snow1) | bliká pouze buňky, které se příště změní |
+| **Změny + šum** (snow2) | + rozptýlené náhodné body |
+| **Změny + sníh** (snow3, default) | + padající vločky |
+| **Změny + roj** (snow4) | + body v okolí měněných buněk |
+| **Změny + sken** (snow5) | + vodorovná „scan" linka putující kódem |
 | **žádné** | bez maskování |
 
-Pozn.: dřívější metody (crossfade, koule, shimmer, měkká záplata, snake, tetris, game of life) zůstávají v kódu (`js/mask-methods.js`, `js/mask-arcade.js`), ale UI nabízí jen sněžení dle zadání.
+Každý snímek se inkoustí jen **ne-rezervované datové moduly** (nikdy findery/timing/format) a nejvýš `perFrameCap` buněk (kalibrováno tak, že i kdyby všechny byly „chyby", v4+H dekóduje na ~100 %). Kód je proto čitelný v **každém** snímku. Dřívější metody (crossfade, koule, shimmer, měkká záplata, snake, tetris, game of life) zůstávají v kódu, ale nejsou v UI.
 
 ## UI
 
 - černé pozadí, QR uprostřed, pod QR aktuální URL
 - **Interval epochy (s)** – jak často se QR přegeneruje (default 1 s)
-- **Maskování** – výběr metody (default sněžení)
+- **Maskování** – 5 variant předblikávání měněných modulů (default Změny + sníh)
 - title stránky nese semver (`het68 QR vX.Y.Z`, viz `package.json`)
 - debug: version, engine, decoder, ecc/ver, mask, epoch, raw Δ, flips, %, ~CSS px
 
