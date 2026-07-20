@@ -1,20 +1,21 @@
 /**
- * Mask balls: R/G/B/C/M/Y/K billiard motion.
- * Constant speed, straight lines; direction changes ONLY on screen-edge bounce
- * (specular by default, or aimed angle at bounce for upcoming covers).
- * Forecast covers multiple future QR changes; balls only graze QR briefly.
+ * Mask balls: R/G/B + C/M/Y/K billiard motion on two independent canvases.
+ * - RGB group: additive blend (lighter) within the group only
+ * - CMYK group: subtractive blend (multiply) within the group only
+ * Groups do not color-mix with each other.
+ * Direction changes ONLY on viewport-edge bounce.
  */
 (function (global) {
   "use strict";
 
   var BALL_COLORS = [
-    { id: "R", hex: "#e53935" },
-    { id: "G", hex: "#43a047" },
-    { id: "B", hex: "#1e88e5" },
-    { id: "C", hex: "#00bcd4" },
-    { id: "M", hex: "#d81b60" },
-    { id: "Y", hex: "#fdd835" },
-    { id: "K", hex: "#111111" }
+    { id: "R", group: "rgb", hex: "#ff0000", rgb: [255, 0, 0] },
+    { id: "G", group: "rgb", hex: "#00ff00", rgb: [0, 255, 0] },
+    { id: "B", group: "rgb", hex: "#0000ff", rgb: [0, 0, 255] },
+    { id: "C", group: "cmyk", hex: "#00ffff", rgb: [0, 255, 255] },
+    { id: "M", group: "cmyk", hex: "#ff00ff", rgb: [255, 0, 255] },
+    { id: "Y", group: "cmyk", hex: "#ffff00", rgb: [255, 255, 0] },
+    { id: "K", group: "cmyk", hex: "#000000", rgb: [0, 0, 0] }
   ];
 
   var BASE_SPEED = 260;
@@ -34,12 +35,17 @@
   function MaskBalls(options) {
     this.enabled = false;
     this.layer = null;
+    this.rgbCanvas = null;
+    this.cmykCanvas = null;
+    this.rgbCtx = null;
+    this.cmykCtx = null;
     this.balls = [];
     this.raf = 0;
     this.lastTs = 0;
     this.events = [];
     this.qrRect = null;
     this.intervalMs = 1000;
+    this.dpr = 1;
     this.getQrRect = options && options.getQrRect ? options.getQrRect : function () { return null; };
     this.onLog = options && options.onLog ? options.onLog : function () {};
   }
@@ -49,9 +55,41 @@
     var layer = document.createElement("div");
     layer.id = "ball-layer";
     layer.setAttribute("aria-hidden", "true");
+
+    var rgb = document.createElement("canvas");
+    rgb.id = "ball-canvas-rgb";
+    rgb.className = "ball-canvas ball-canvas-rgb";
+    var cmyk = document.createElement("canvas");
+    cmyk.id = "ball-canvas-cmyk";
+    cmyk.className = "ball-canvas ball-canvas-cmyk";
+
+    layer.appendChild(rgb);
+    layer.appendChild(cmyk);
     document.body.appendChild(layer);
+
     this.layer = layer;
+    this.rgbCanvas = rgb;
+    this.cmykCanvas = cmyk;
+    this.rgbCtx = rgb.getContext("2d", { alpha: true });
+    this.cmykCtx = cmyk.getContext("2d", { alpha: true });
+    this.resizeCanvases();
     return layer;
+  };
+
+  MaskBalls.prototype.resizeCanvases = function () {
+    if (!this.rgbCanvas || !this.cmykCanvas) return;
+    var dpr = Math.min(2, window.devicePixelRatio || 1);
+    this.dpr = dpr;
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    var canvases = [this.rgbCanvas, this.cmykCanvas];
+    for (var i = 0; i < canvases.length; i++) {
+      var c = canvases[i];
+      c.width = Math.max(1, Math.floor(w * dpr));
+      c.height = Math.max(1, Math.floor(h * dpr));
+      c.style.width = w + "px";
+      c.style.height = h + "px";
+    }
   };
 
   MaskBalls.prototype.setEnabled = function (on) {
@@ -59,23 +97,17 @@
     if (this.enabled) {
       this.ensureLayer();
       this.layer.style.display = "block";
+      this.resizeCanvases();
       if (!this.balls.length) this.spawnPalette();
       this.startLoop();
     } else {
       this.stopLoop();
       this.events = [];
-      this.clearBalls();
+      this.balls = [];
+      if (this.rgbCtx && this.rgbCanvas) this.rgbCtx.clearRect(0, 0, this.rgbCanvas.width, this.rgbCanvas.height);
+      if (this.cmykCtx && this.cmykCanvas) this.cmykCtx.clearRect(0, 0, this.cmykCanvas.width, this.cmykCanvas.height);
       if (this.layer) this.layer.style.display = "none";
     }
-  };
-
-  MaskBalls.prototype.clearBalls = function () {
-    for (var i = 0; i < this.balls.length; i++) {
-      if (this.balls[i].el && this.balls[i].el.parentNode) {
-        this.balls[i].el.parentNode.removeChild(this.balls[i].el);
-      }
-    }
-    this.balls = [];
   };
 
   MaskBalls.prototype.spawnPalette = function () {
@@ -97,19 +129,12 @@
   };
 
   MaskBalls.prototype.spawnBall = function (x, y, r, color, vx, vy) {
-    var layer = this.ensureLayer();
-    var el = document.createElement("div");
-    el.className = "mask-ball color-" + color.id;
-    el.style.background = color.hex;
-    el.style.width = r * 2 + "px";
-    el.style.height = r * 2 + "px";
-    el.title = color.id;
-    layer.appendChild(el);
     var speed = hypot(vx, vy) || BASE_SPEED;
     var ball = {
-      el: el,
       colorId: color.id,
+      group: color.group,
       hex: color.hex,
+      rgb: color.rgb.slice(),
       x: x,
       y: y,
       vx: vx,
@@ -117,15 +142,11 @@
       speed: speed,
       r: r,
       pendingAngle: null,
-      queue: []
+      queue: [],
+      covering: false
     };
     this.balls.push(ball);
-    this.place(ball);
     return ball;
-  };
-
-  MaskBalls.prototype.place = function (ball) {
-    ball.el.style.transform = "translate(" + (ball.x - ball.r) + "px," + (ball.y - ball.r) + "px)";
   };
 
   MaskBalls.prototype.playBounds = function (ball) {
@@ -139,7 +160,6 @@
     };
   };
 
-  /** Image of point in unfolded billiard table for bounce path aiming. */
   MaskBalls.prototype.unfoldPoint = function (px, py, nx, ny, bounds) {
     var W = bounds.R - bounds.L;
     var H = bounds.B - bounds.T;
@@ -155,10 +175,6 @@
     };
   };
 
-  /**
-   * Choose outbound angle at bounce point so a specular billiard path
-   * reaches target near travelDist. Returns angle or null.
-   */
   MaskBalls.prototype.aimAngleFromBounce = function (bx, by, target, travelDist, ball) {
     var bounds = this.playBounds(ball);
     var best = null;
@@ -188,7 +204,6 @@
       }
     }
     if (best == null) return null;
-    // Accept generous timing slack — graze still helps; horizon planning needs hits
     var slack = Math.max(ball.r * 2.8, travelDist * 0.28, 70);
     if (bestRaw > slack) return null;
     return best;
@@ -264,10 +279,6 @@
     });
   };
 
-  /**
-   * events: [{ slot, changeAtMs, moduleSize, margin, diffs: [[r,c],...] }, ...]
-   * Sorted soonest-first. Replaces forecast and reassigns bounce aims.
-   */
   MaskBalls.prototype.setForecast = function (events, meta) {
     if (!this.enabled) return;
     this.intervalMs = (meta && meta.intervalMs) || this.intervalMs || 1000;
@@ -311,7 +322,6 @@
     this.startLoop();
   };
 
-  /** Back-compat single-step planner */
   MaskBalls.prototype.planForDiffs = function (moduleDiffs, meta) {
     this.setForecast([{
       slot: meta.slot || 0,
@@ -326,7 +336,7 @@
     for (var i = 0; i < this.balls.length; i++) {
       this.balls[i].queue = [];
       this.balls[i].pendingAngle = null;
-      this.balls[i].el.classList.remove("is-cover");
+      this.balls[i].covering = false;
     }
   };
 
@@ -336,7 +346,6 @@
       ball.queue = (ball.queue || []).filter(function (a) {
         return a.changeAtMs + a.coverMs > now - 20;
       });
-      if (!ball.queue.length) ball.el.classList.remove("is-cover");
     }
   };
 
@@ -348,7 +357,6 @@
     this.pruneBallQueues(now);
   };
 
-  /** Simulate specular path; return {tBounce, x, y, wall} for first bounce, or null. */
   MaskBalls.prototype.nextBounce = function (ball, maxT) {
     var bounds = this.playBounds(ball);
     var vx = ball.vx;
@@ -375,7 +383,6 @@
     var t = Math.min(tx, ty);
     if (!isFinite(t) || t < 0 || t > maxT) return null;
     var wall = t === tx ? wallX : wallY;
-    // Corner: both
     if (Math.abs(tx - ty) < 1e-6) wall = (wallX || "") + (wallY || "");
     return {
       t: t,
@@ -385,7 +392,6 @@
     };
   };
 
-  /** Will current specular trajectory graze target near changeAt? */
   MaskBalls.prototype.trajectoryCovers = function (ball, target, changeAtMs, coverMs, now) {
     var tHit = (changeAtMs - now) / 1000;
     if (tHit < 0 || tHit > 12) return false;
@@ -403,20 +409,14 @@
       var remain = tHit + coverMs / 1000 - elapsed;
       var nb = this.nextBounce(sim, remain + 1e-4);
       var dt = nb ? Math.min(nb.t, remain) : remain;
-      var x1 = sim.x + sim.vx * dt;
-      var y1 = sim.y + sim.vy * dt;
-      // Closest approach on this segment to target
-      var dx = x1 - sim.x;
-      var dy = y1 - sim.y;
+      var dx = sim.vx * dt;
+      var dy = sim.vy * dt;
       var len2 = dx * dx + dy * dy;
-      var closestDist;
-      if (len2 < 1e-8) {
-        closestDist = hypot(sim.x - target.x, sim.y - target.y);
-      } else {
+      if (len2 >= 1e-8) {
         var u = clamp(((target.x - sim.x) * dx + (target.y - sim.y) * dy) / len2, 0, 1);
         var cx = sim.x + u * dx;
         var cy = sim.y + u * dy;
-        closestDist = hypot(cx - target.x, cy - target.y);
+        var closestDist = hypot(cx - target.x, cy - target.y);
         var tSeg = elapsed + u * dt;
         if (closestDist <= ball.r + target.r * 0.35 &&
             Math.abs(tSeg - tHit) <= (coverMs / 1000) * 0.9) {
@@ -427,7 +427,6 @@
       sim.x = nb.x;
       sim.y = nb.y;
       elapsed += nb.t;
-      // Specular
       if (nb.wall.indexOf("L") >= 0 || nb.wall.indexOf("R") >= 0) sim.vx = -sim.vx;
       if (nb.wall.indexOf("T") >= 0 || nb.wall.indexOf("B") >= 0) sim.vy = -sim.vy;
       steps++;
@@ -439,7 +438,6 @@
     var q = ball.queue || [];
     for (var i = 0; i < q.length; i++) {
       var a = q[i];
-      // Overlapping graze windows → busy
       if (Math.abs(a.changeAtMs - changeAtMs) < (a.coverMs + coverMs + 80)) return false;
     }
     return true;
@@ -448,9 +446,8 @@
   MaskBalls.prototype.assignAndAim = function (now) {
     for (var i = 0; i < this.balls.length; i++) {
       this.balls[i].queue = [];
-      this.balls[i].el.classList.remove("is-cover");
+      this.balls[i].covering = false;
     }
-    // Aim only for the soonest job per ball (first bounce decision)
     var aimForBall = {};
 
     for (var ei = 0; ei < this.events.length; ei++) {
@@ -460,12 +457,19 @@
         var chosen = null;
         var chosenScore = Infinity;
         var chosenAng = null;
+        var bi;
+        var ball;
+        var score;
+        var tAvail;
+        var nb;
+        var travel;
+        var ang;
 
-        for (var bi = 0; bi < this.balls.length; bi++) {
-          var ball = this.balls[bi];
+        for (bi = 0; bi < this.balls.length; bi++) {
+          ball = this.balls[bi];
           if (!this.ballFreeFor(ball, ev.changeAtMs, ev.coverMs)) continue;
           if (this.trajectoryCovers(ball, target, ev.changeAtMs, ev.coverMs, now)) {
-            var score = Math.abs(ev.changeAtMs - now);
+            score = Math.abs(ev.changeAtMs - now);
             if (score < chosenScore) {
               chosenScore = score;
               chosen = bi;
@@ -478,12 +482,12 @@
           for (bi = 0; bi < this.balls.length; bi++) {
             ball = this.balls[bi];
             if (!this.ballFreeFor(ball, ev.changeAtMs, ev.coverMs)) continue;
-            var tAvail = (ev.changeAtMs - now) / 1000;
+            tAvail = (ev.changeAtMs - now) / 1000;
             if (tAvail < 0.05) continue;
-            var nb = this.nextBounce(ball, tAvail);
+            nb = this.nextBounce(ball, tAvail);
             if (!nb) continue;
-            var travel = ball.speed * Math.max(0.04, tAvail - nb.t);
-            var ang = this.aimAngleFromBounce(nb.x, nb.y, target, travel, ball);
+            travel = ball.speed * Math.max(0.04, tAvail - nb.t);
+            ang = this.aimAngleFromBounce(nb.x, nb.y, target, travel, ball);
             if (ang == null) continue;
             score = nb.t * 1000 + Math.abs(travel - hypot(target.x - nb.x, target.y - nb.y));
             if (score < chosenScore) {
@@ -528,7 +532,6 @@
             slot: ev.slot
           };
           ball.queue.push(job);
-          // Pending bounce angle only for the earliest job of this ball
           if (aimForBall[chosen] == null || job.changeAtMs < aimForBall[chosen].changeAtMs) {
             aimForBall[chosen] = { job: job, ang: chosenAng };
           }
@@ -558,10 +561,6 @@
     }
   };
 
-  /**
-   * Integrate motion; on wall hit apply pending aimed angle OR specular reflect.
-   * No mid-air steering.
-   */
   MaskBalls.prototype.integrate = function (ball, dt) {
     var bounds = this.playBounds(ball);
     var remaining = dt;
@@ -584,7 +583,6 @@
         ball.vx = Math.cos(ang) * ball.speed;
         ball.vy = Math.sin(ang) * ball.speed;
       } else {
-        // Specular reflection — only angle change allowed
         if (nb.wall.indexOf("L") >= 0 || nb.wall.indexOf("R") >= 0) {
           ball.vx = -ball.vx;
         }
@@ -592,14 +590,72 @@
           ball.vy = -ball.vy;
         }
       }
-      // Renormalize speed (numerical drift)
       var sp = hypot(ball.vx, ball.vy) || ball.speed;
       ball.vx = (ball.vx / sp) * ball.speed;
       ball.vy = (ball.vy / sp) * ball.speed;
-
-      // Nudge inside bounds
       ball.x = clamp(ball.x, bounds.L, bounds.R);
       ball.y = clamp(ball.y, bounds.T, bounds.B);
+    }
+  };
+
+  MaskBalls.prototype.drawBall = function (ctx, ball, scale) {
+    var r = ball.r * scale;
+    var x = ball.x * scale;
+    var y = ball.y * scale;
+    var col = ball.rgb;
+    var alpha = ball.covering ? 1 : 0.92;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(" + col[0] + "," + col[1] + "," + col[2] + "," + alpha + ")";
+    ctx.fill();
+    if (ball.covering) {
+      ctx.lineWidth = 2 * scale;
+      ctx.strokeStyle = "rgba(255,255,255,0.55)";
+      ctx.stroke();
+    }
+  };
+
+  /** Paint RGB (additive) and CMYK (subtractive) on separate canvases — no cross-group mix. */
+  MaskBalls.prototype.paint = function () {
+    if (!this.rgbCtx || !this.cmykCtx) return;
+    var w = this.rgbCanvas.width;
+    var h = this.rgbCanvas.height;
+    var scale = this.dpr;
+    var rgbBalls = [];
+    var cmykBalls = [];
+    for (var i = 0; i < this.balls.length; i++) {
+      if (this.balls[i].group === "rgb") rgbBalls.push(this.balls[i]);
+      else cmykBalls.push(this.balls[i]);
+    }
+
+    // RGB — additive (lighter)
+    var ctx = this.rgbCtx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.globalCompositeOperation = "lighter";
+    for (i = 0; i < rgbBalls.length; i++) this.drawBall(ctx, rgbBalls[i], scale);
+    ctx.globalCompositeOperation = "source-over";
+
+    // CMYK — subtractive (multiply on white), then keep only ball union alpha
+    ctx = this.cmykCtx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    if (cmykBalls.length) {
+      ctx.globalCompositeOperation = "source-over";
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, w, h);
+      ctx.globalCompositeOperation = "multiply";
+      for (i = 0; i < cmykBalls.length; i++) this.drawBall(ctx, cmykBalls[i], scale);
+      ctx.globalCompositeOperation = "destination-in";
+      ctx.fillStyle = "#ffffff";
+      for (i = 0; i < cmykBalls.length; i++) {
+        var b = cmykBalls[i];
+        ctx.beginPath();
+        ctx.arc(b.x * scale, b.y * scale, b.r * scale, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalCompositeOperation = "source-over";
     }
   };
 
@@ -610,10 +666,15 @@
     this.lastTs = ts;
     var now = Date.now();
 
+    if (this.rgbCanvas &&
+        (this.rgbCanvas.style.width !== window.innerWidth + "px" ||
+         this.rgbCanvas.style.height !== window.innerHeight + "px")) {
+      this.resizeCanvases();
+    }
+
     for (var i = 0; i < this.balls.length; i++) {
       var ball = this.balls[i];
       this.integrate(ball, dt);
-
       var covering = false;
       var q = ball.queue || [];
       for (var qi = 0; qi < q.length; qi++) {
@@ -622,9 +683,10 @@
         var inTime = now >= a.changeAtMs - a.coverMs && now <= a.changeAtMs + a.coverMs;
         if (inTime && dist <= ball.r + a.r * 0.55) covering = true;
       }
-      ball.el.classList.toggle("is-cover", covering);
-      this.place(ball);
+      ball.covering = covering;
     }
+
+    this.paint();
 
     this.events = this.events.filter(function (ev) {
       return ev.changeAtMs + ev.coverMs > now - 40;
@@ -646,7 +708,6 @@
     this.lastTs = 0;
   };
 
-  // Expose for debug
   MaskBalls.COLORS = BALL_COLORS;
 
   global.MaskBalls = MaskBalls;

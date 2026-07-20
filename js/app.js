@@ -1152,6 +1152,12 @@
     fail(ev.reason, "unhandledrejection");
   });
 
-  log("Boot", location.href + (IS_MOBILE ? " [mobile]" : " [desktop]"));
+  if (window.APP_VERSION) {
+    document.title = "het68 QR v" + window.APP_VERSION;
+    var verEl = document.getElementById("d-version");
+    if (verEl) verEl.textContent = window.APP_VERSION;
+  }
+
+  log("Boot", "v" + (window.APP_VERSION || "?") + " " + location.href + (IS_MOBILE ? " [mobile]" : " [desktop]"));
   start();
 })();
