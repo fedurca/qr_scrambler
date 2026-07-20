@@ -1,6 +1,7 @@
 /**
  * Optional bouncing mask balls that cover upcoming QR module changes.
  * Default: disabled. Smooth rAF motion with edge bounces.
+ * Timing uses wall-clock Date.now() (same as epoch slot boundaries).
  */
 (function (global) {
   "use strict";
@@ -104,16 +105,16 @@
         28
       );
     }
-    // Hide extras visually at edge if too many
     for (var i = 0; i < this.balls.length; i++) {
-      this.balls[i].el.style.opacity = i < n || this.balls[i].mode !== "idle" ? "0.92" : "0.35";
+      this.balls[i].el.style.opacity = i < n || this.balls[i].mode !== "idle" ? "1" : "0.45";
     }
   };
 
   /**
    * Cluster changed module cells into cover targets in viewport coords.
    * moduleDiffs: [[row,col], ...]
-   * meta: { moduleSize, margin, changeAtMs }
+   * meta: { moduleSize, margin, changeAtMs, intervalMs }
+   * changeAtMs must be wall-clock Date.now() epoch ms.
    */
   MaskBalls.prototype.planForDiffs = function (moduleDiffs, meta) {
     if (!this.enabled) return;
@@ -129,8 +130,7 @@
     var cellW = qr.width / n;
     var cellH = qr.height / n;
 
-    // Grid clustering
-    var cell = Math.max(4, Math.round(size / 12));
+    var cell = Math.max(3, Math.round(size / 10));
     var buckets = {};
     for (var i = 0; i < moduleDiffs.length; i++) {
       var row = moduleDiffs[i][0];
@@ -151,19 +151,18 @@
 
     var clusters = [];
     Object.keys(buckets).forEach(function (k) {
-      var b = buckets[k];
-      var mr = b.sumR / b.count;
-      var mc = b.sumC / b.count;
-      var span = Math.max(b.maxR - b.minR + 1, b.maxC - b.minC + 1);
+      var bb = buckets[k];
+      var mr = bb.sumR / bb.count;
+      var mc = bb.sumC / bb.count;
+      var span = Math.max(bb.maxR - bb.minR + 1, bb.maxC - bb.minC + 1);
       clusters.push({
         row: mr,
         col: mc,
-        count: b.count,
-        radiusMod: Math.max(2.5, span * 0.65)
+        count: bb.count,
+        radiusMod: Math.max(2.5, span * 0.75)
       });
     });
 
-    // Merge very close clusters
     clusters.sort(function (a, b) { return b.count - a.count; });
     var merged = [];
     for (i = 0; i < clusters.length; i++) {
@@ -185,9 +184,20 @@
       if (!absorbed) merged.push(c);
     }
 
+    // Cap missions so motion stays readable
+    if (merged.length > 6) merged = merged.slice(0, 6);
+
+    var now = Date.now();
     var changeAt = meta.changeAtMs;
-    var coverMs = Math.min(180, Math.max(90, (meta.intervalMs || 1000) * 0.08));
-    var approachMs = Math.min(420, Math.max(220, (meta.intervalMs || 1000) * 0.18));
+    var coverMs = Math.min(220, Math.max(110, (meta.intervalMs || 1000) * 0.12));
+    var approachMs = Math.min(520, Math.max(260, (meta.intervalMs || 1000) * 0.28));
+
+    // Late plan: still fly onto QR and cover briefly
+    if (!isFinite(changeAt) || changeAt < now + 40) {
+      changeAt = now + Math.min(120, approachMs * 0.35);
+      approachMs = Math.max(80, changeAt - now);
+    }
+
     var leaveAt = changeAt + coverMs;
     var approachAt = changeAt - approachMs;
 
@@ -195,7 +205,7 @@
     this.missions = merged.map(function (cl) {
       var x = qr.left + (cl.col + margin + 0.5) * cellW;
       var y = qr.top + (cl.row + margin + 0.5) * cellH;
-      var radius = Math.max(22, Math.min(56, cl.radiusMod * Math.max(cellW, cellH) * 0.9));
+      var radius = Math.max(24, Math.min(64, cl.radiusMod * Math.max(cellW, cellH) * 1.05));
       return {
         x: x,
         y: y,
@@ -214,7 +224,8 @@
       this.balls[i].el.style.width = this.missions[i].r * 2 + "px";
       this.balls[i].el.style.height = this.missions[i].r * 2 + "px";
       this.balls[i].mission = this.missions[i];
-      this.balls[i].mode = "idle";
+      // Kick into approach immediately if window already open
+      this.balls[i].mode = now >= approachAt ? "approach" : "idle";
     }
     for (; i < this.balls.length; i++) {
       this.balls[i].mission = null;
@@ -224,19 +235,21 @@
     this.onLog("Mask balls planned", {
       clusters: this.missions.length,
       diffs: moduleDiffs.length,
-      approachMs: approachMs,
-      coverMs: coverMs
+      approachMs: Math.round(approachMs),
+      coverMs: Math.round(coverMs),
+      inMs: Math.round(changeAt - now)
     });
     this.startLoop();
   };
 
   MaskBalls.prototype.notifyChanged = function () {
-    // Nudge covering balls into retreat immediately after swap.
-    var now = performance.now();
+    var now = Date.now();
     for (var i = 0; i < this.balls.length; i++) {
       var ball = this.balls[i];
       if (ball.mission && now >= ball.mission.coverAt) {
         ball.mode = "retreat";
+        // Shorten leave so balls clear for scanning
+        if (ball.mission.leaveAt > now + 80) ball.mission.leaveAt = now + 80;
       }
     }
   };
@@ -268,11 +281,12 @@
     ball.vy = (dy / dist) * speed;
   };
 
+  /** Idle only: keep clear of QR so the code stays scannable between covers. */
   MaskBalls.prototype.avoidQrCenter = function (ball, qr) {
     if (!qr) return;
     var cx = qr.left + qr.width / 2;
     var cy = qr.top + qr.height / 2;
-    var pad = 36;
+    var pad = 28;
     var inside =
       ball.x > qr.left - pad &&
       ball.x < qr.left + qr.width + pad &&
@@ -295,7 +309,8 @@
     var w = window.innerWidth;
     var h = window.innerHeight;
     var qr = this.getQrRect();
-    var now = performance.now();
+    // MUST match changeAtMs from app (wall clock), not performance.now()
+    var now = Date.now();
 
     for (var i = 0; i < this.balls.length; i++) {
       var ball = this.balls[i];
@@ -303,37 +318,35 @@
 
       if (m && now >= m.approachAt && now < m.coverAt) {
         ball.mode = "approach";
-        var remain = Math.max(0.05, (m.coverAt - now) / 1000);
+        var remain = Math.max(0.04, (m.coverAt - now) / 1000);
         var need = Math.hypot(m.x - ball.x, m.y - ball.y);
-        var speed = clamp(need / remain, 280, 1400);
+        var speed = clamp(need / remain, 320, 1800);
         this.steerTo(ball, m.x, m.y, speed);
         this.bounce(ball, dt, w, h);
-        // Soft snap late in approach
-        if (now > m.coverAt - 40) {
-          ball.x += (m.x - ball.x) * 0.45;
-          ball.y += (m.y - ball.y) * 0.45;
+        // Soft snap late in approach — over the QR is intended
+        if (now > m.coverAt - 60) {
+          ball.x += (m.x - ball.x) * 0.55;
+          ball.y += (m.y - ball.y) * 0.55;
         }
       } else if (m && now >= m.coverAt && now < m.leaveAt) {
         ball.mode = "cover";
-        ball.x += (m.x - ball.x) * 0.35;
-        ball.y += (m.y - ball.y) * 0.35;
-        ball.vx *= 0.2;
-        ball.vy *= 0.2;
+        ball.x = m.x;
+        ball.y = m.y;
+        ball.vx = 0;
+        ball.vy = 0;
       } else if (m && (now >= m.leaveAt || ball.mode === "retreat")) {
         ball.mode = "retreat";
-        // Fly to nearest outer corner away from QR
         var tx = ball.x < w / 2 ? ball.r + 8 : w - ball.r - 8;
         var ty = ball.y < h / 2 ? ball.r + 8 : h - ball.r - 8;
         if (qr) {
-          // Prefer side with more free space relative to QR
           tx = Math.abs(qr.left - 0) > Math.abs(w - (qr.left + qr.width))
             ? ball.r + 10
             : w - ball.r - 10;
-          ty = ball.y;
+          ty = clamp(ball.y, ball.r + 8, h - ball.r - 8);
         }
-        this.steerTo(ball, tx, ty, 900);
+        this.steerTo(ball, tx, ty, 1000);
         this.bounce(ball, dt, w, h);
-        if (Math.hypot(ball.x - tx, ball.y - ty) < 24 || now > m.leaveAt + 500) {
+        if (Math.hypot(ball.x - tx, ball.y - ty) < 28 || now > m.leaveAt + 600) {
           ball.mission = null;
           ball.mode = "idle";
           var ang = Math.random() * Math.PI * 2;

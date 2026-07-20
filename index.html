@@ -60,8 +60,11 @@
     </div>
   </aside>
 
+  <!-- Sync vendor first so window.QRCode / jsQR exist before app boots -->
+  <script src="vendor/qrcode.min.js"></script>
+  <script src="vendor/jsQR.js"></script>
   <script src="js/codec.js"></script>
   <script src="js/mask-balls.js"></script>
-  <script src="js/app.js" defer></script>
+  <script src="js/app.js"></script>
 </body>
 </html>

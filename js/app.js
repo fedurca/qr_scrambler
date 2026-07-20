@@ -147,13 +147,31 @@
     log("ERROR", state.lastError);
   }
 
+  function resolveAsset(src) {
+    try {
+      return new URL(src, document.baseURI || location.href).href;
+    } catch (e) {
+      return src;
+    }
+  }
+
   function loadScript(src) {
+    var href = resolveAsset(src);
     return new Promise(function (resolve, reject) {
+      // Reuse if already present (sync <script> tags in index.html)
+      var existing = document.querySelector('script[src="' + src + '"], script[src="' + href + '"]');
+      if (existing && existing.dataset && existing.dataset.loaded === "1") {
+        resolve();
+        return;
+      }
       var s = document.createElement("script");
-      s.src = src;
+      s.src = href;
       s.async = true;
-      s.onload = function () { resolve(); };
-      s.onerror = function () { reject(new Error("Script load failed: " + src)); };
+      s.onload = function () {
+        s.dataset.loaded = "1";
+        resolve();
+      };
+      s.onerror = function () { reject(new Error("Script load failed: " + href)); };
       document.head.appendChild(s);
     });
   }
@@ -732,6 +750,13 @@
   }
 
   function loadDecoder() {
+    if (typeof window.jsQR === "function") {
+      state.decoder = window.jsQR;
+      state.decoderSource = "preloaded";
+      setMeta("d-decoder", "preloaded");
+      log("Decoder ready", "preloaded");
+      return Promise.resolve();
+    }
     var i = 0;
     function next() {
       if (i >= DECODER_CANDIDATES.length) {
@@ -754,6 +779,19 @@
   }
 
   function loadEngine() {
+    // Prefer sync-preloaded vendor/qrcode.min.js (index.html)
+    var pre = pickGlobalNodeQrcode("preloaded");
+    if (pre) {
+      state.engineId = pre.id;
+      state.source = pre.source;
+      state.api = pre.api;
+      state.simpleRenderer = null;
+      setMeta("d-engine", pre.id);
+      setMeta("d-source", pre.source);
+      log("Engine ready", pre.id + " via " + pre.source);
+      return Promise.resolve(pre);
+    }
+
     var i = 0;
     function next() {
       if (i >= SCRIPT_CANDIDATES.length) {
@@ -766,7 +804,7 @@
 
       var attempt;
       if (cand.type === "esm") {
-        attempt = import(cand.src).then(function (mod) { return adaptNodeQrcode(mod, cand.id); });
+        attempt = import(resolveAsset(cand.src)).then(function (mod) { return adaptNodeQrcode(mod, cand.id); });
       } else if (cand.type === "qrcodejs") {
         attempt = loadScript(cand.src).then(function () { return adaptQrcodejs(cand.id); });
       } else {
