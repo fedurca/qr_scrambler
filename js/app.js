@@ -723,13 +723,40 @@
     return best;
   }
 
+  /** Top-N canonical candidates ordered by raw diff (for multi-candidate stabilize). */
+  function chooseCanonicalList(api, epoch, prevModules, prevPad, topN) {
+    var cands = [];
+    function consider(pad, mask) {
+      var url = buildUrl(epoch, pad);
+      var modules = createModules(api, url, mask);
+      var raw = prevModules ? listDiffs(prevModules, modules).length : 0;
+      cands.push({ url: url, pad: pad, mask: mask, modules: modules, raw: raw });
+    }
+    var mask;
+    for (mask = 0; mask < 8; mask++) consider(prevPad, mask);
+    cands.sort(function (a, b) { return a.raw - b.raw; });
+    var basePad = cands[0].pad;
+    var baseMask = cands[0].mask;
+    for (var t = 0; t < 12; t++) consider(mutatePadSuffix(basePad, state.padLen), baseMask);
+    cands.sort(function (a, b) { return a.raw - b.raw; });
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < cands.length && out.length < (topN || 3); i++) {
+      var key = cands[i].mask + "|" + cands[i].url;
+      if (seen[key]) continue;
+      seen[key] = 1;
+      out.push(cands[i]);
+    }
+    return out;
+  }
+
   async function buildFrame(api, epoch, prevModules, prevPad, budgetMs, shouldCancel) {
-    var canonical = chooseCanonical(api, epoch, prevModules, prevPad || state.pad);
     if (!prevModules) {
+      var first = chooseCanonical(api, epoch, prevModules, prevPad || state.pad);
       return {
-        canonical: canonical,
+        canonical: first,
         result: {
-          modules: copyModules(canonical.modules),
+          modules: copyModules(first.modules),
           flips: 0,
           raw: 0,
           orders: 0,
@@ -737,14 +764,37 @@
         }
       };
     }
-    var result = await stabilize(
-      prevModules,
-      canonical.modules,
-      canonical.url,
-      budgetMs,
-      shouldCancel
-    );
-    return { canonical: canonical, result: result };
+
+    // Stabilize the top-N lowest-raw candidates and keep the global minimum:
+    // a higher-raw candidate often stabilizes to fewer flips than the lowest-raw one.
+    var cands = chooseCanonicalList(api, epoch, prevModules, prevPad || state.pad, 3);
+    var deadlineAll = Date.now() + budgetMs;
+    var perBudget = Math.max(90, Math.floor(budgetMs / cands.length));
+    var bestCanon = null;
+    var bestRes = null;
+    for (var i = 0; i < cands.length; i++) {
+      if (shouldCancel && shouldCancel()) break;
+      var remaining = deadlineAll - Date.now();
+      if (remaining <= 40 && bestRes) break;
+      var b = Math.max(60, Math.min(perBudget, remaining));
+      var res = await stabilize(prevModules, cands[i].modules, cands[i].url, b, shouldCancel);
+      if (!bestRes || res.flips < bestRes.flips) {
+        bestRes = res;
+        bestCanon = cands[i];
+      }
+      if (bestRes.flips <= 2) break; // already near-optimal
+    }
+    if (!bestRes) {
+      bestCanon = cands[0];
+      bestRes = {
+        modules: copyModules(cands[0].modules),
+        flips: cands[0].raw,
+        raw: cands[0].raw,
+        orders: 0,
+        mode: "canonical"
+      };
+    }
+    return { canonical: bestCanon, result: bestRes };
   }
 
   function zeroPad(len) {
