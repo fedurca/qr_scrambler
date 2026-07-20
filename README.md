@@ -54,7 +54,7 @@ Debug pole `~CSS px` ukazuje odhad podle aktuální velikosti QR na obrazovce.
 - černé pozadí, QR uprostřed
 - pod QR aktuální URL
 - **Interval epochy (s)** – jak často se QR přegeneruje (default 1 s)
-- **Maskovací koule** – volitelné (default vypnuté); koule se odrážejí od hran okna a na chvíli zakryjí oblasti příští změny, pak uhnou, aby šel kód znovu číst
+- **Maskovací koule** – volitelné (default vypnuté); 7 koulí **R G B C M Y K**, letí rovně a směr mění jen odrazem od okrajů obrazovky; QR změny se počítají několik kroků dopředu, překrytí je jen krátký průlet
 - debug: engine, decoder, epoch, raw Δ, flips, %, ~CSS px
 
 ## Lokální assety (CDN jen fallback)

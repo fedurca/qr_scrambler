@@ -146,17 +146,18 @@ main {
   left: 0;
   top: 0;
   border-radius: 50%;
-  background: radial-gradient(circle at 35% 30%, #2a2a2a 0%, #050505 55%, #000 100%);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
-  opacity: 0.95;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22);
+  opacity: 0.92;
   will-change: transform;
 }
 
+.mask-ball.color-K {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+
 .mask-ball.is-cover {
-  /* Solid cover over white QR modules */
-  background: #000;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18);
   opacity: 1;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.45);
 }
 
 #debug {
