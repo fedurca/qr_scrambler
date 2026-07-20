@@ -12,7 +12,9 @@
  * - CMYK group: subtractive (multiply) — separate canvas
  * - Groups do not color-mix with each other
  *
- * Cover: intercept change discs, brief hold at flip, then evacuate QR.
+ * Cover: intercept change discs, hold until the QR is actually painted,
+ * then brief trail and evacuate. Jobs must not expire on planned time alone —
+ * paint can lag the slot clock by hundreds of ms.
  */
 (function (global) {
   "use strict";
@@ -78,7 +80,7 @@
     this.lastTs = 0;
     this.events = [];
     this.qrRect = null;
-    this.intervalMs = 1000;
+    this.intervalMs = 5000;
     this.dpr = 1;
     this.getQrRect = options && options.getQrRect ? options.getQrRect : function () { return null; };
     this.onLog = options && options.onLog ? options.onLog : function () {};
@@ -151,16 +153,27 @@
   MaskBalls.prototype.spawnPalette = function () {
     var w = window.innerWidth;
     var h = window.innerHeight;
+    var qr = this.getQrRect ? this.getQrRect() : null;
+    // Spawn in a ring around the QR so the first flip is reachable
+    var cx = qr ? qr.left + qr.width / 2 : w * 0.5;
+    var cy = qr ? qr.top + qr.height / 2 : h * 0.5;
+    var ring = qr
+      ? Math.max(qr.width, qr.height) * 0.5 + BALL_R * 2.2
+      : Math.min(w, h) * 0.22;
     for (var i = 0; i < BALL_COLORS.length; i++) {
       var c = BALL_COLORS[i];
       var speed = BASE_SPEED + (Math.random() * 2 - 1) * SPEED_JITTER;
-      var ang = (i / BALL_COLORS.length) * Math.PI * 2 + Math.random() * 0.55;
+      var ang = (i / BALL_COLORS.length) * Math.PI * 2 + Math.random() * 0.35;
+      var x = clamp(cx + Math.cos(ang) * ring, BALL_R + 8, w - BALL_R - 8);
+      var y = clamp(cy + Math.sin(ang) * ring, BALL_R + 8, h - BALL_R - 8);
+      // Tangential cruise — stay near the code without cutting through it
+      var tang = ang + Math.PI / 2;
       this.spawnBall(
-        BALL_R + 20 + Math.random() * Math.max(1, w - BALL_R * 2 - 40),
-        BALL_R + 20 + Math.random() * Math.max(1, h - BALL_R * 2 - 40),
+        x,
+        y,
         c,
-        Math.cos(ang) * speed,
-        Math.sin(ang) * speed
+        Math.cos(tang) * speed,
+        Math.sin(tang) * speed
       );
     }
   };
@@ -495,16 +508,37 @@
 
   MaskBalls.prototype.jobLockLeadMs = function () {
     var iv = this.intervalMs || 1000;
-    // Short intervals: lock almost the whole cycle so N+1 prefetch cannot steal cover.
-    return Math.max(JOB_LOCK_MIN_MS, Math.min(JOB_LOCK_MAX_MS, Math.floor(iv * 0.92)));
+    // Lock from early in the cycle so N+1 prefetch cannot steal cover for N.
+    return Math.max(JOB_LOCK_MIN_MS, Math.min(Math.floor(iv * 0.95), Math.max(JOB_LOCK_MAX_MS, Math.floor(iv * 0.6))));
   };
 
-  /** True while a job must survive reassignment (imminent flip or cover trail). */
+  /** Grace after planned flip time while waiting for a late paint. */
+  MaskBalls.prototype.paintGraceMs = function () {
+    // Stabilize/busy often delays paint 0.5–2s past the slot clock.
+    return Math.max(1500, Math.min(5000, (this.intervalMs || 1000) * 1.2));
+  };
+
+  /**
+   * True while a job must survive reassignment.
+   * Unpainted jobs stay locked from lock-lead through planned time + paint grace
+   * (stabilize/busy can delay the real QR paint past changeAtMs).
+   */
   MaskBalls.prototype.jobIsLocked = function (job, now) {
     if (!job) return false;
     var trail = job.trailMs != null ? job.trailMs : COVER_TRAIL_MS;
-    if (now > job.changeAtMs + trail) return false;
+    if (job.painted) {
+      return now <= job.changeAtMs + trail;
+    }
+    if (now > job.changeAtMs + this.paintGraceMs()) return false;
+    // Committed once within lock lead, or already past planned time awaiting paint
     return now >= job.changeAtMs - this.jobLockLeadMs();
+  };
+
+  MaskBalls.prototype.jobStillActive = function (job, now) {
+    if (!job) return false;
+    var trail = job.trailMs != null ? job.trailMs : COVER_TRAIL_MS;
+    if (job.painted) return now <= job.changeAtMs + trail;
+    return now <= job.changeAtMs + this.paintGraceMs();
   };
 
   MaskBalls.prototype.setForecast = function (events, meta) {
@@ -638,29 +672,40 @@
   };
 
   MaskBalls.prototype.pruneBallQueues = function (now) {
+    var self = this;
     for (var i = 0; i < this.balls.length; i++) {
       var ball = this.balls[i];
       ball.queue = (ball.queue || []).filter(function (a) {
-        var trail = a.trailMs != null ? a.trailMs : COVER_TRAIL_MS;
-        return a.changeAtMs + trail > now - 20;
+        return self.jobStillActive(a, now);
       });
     }
   };
 
-  MaskBalls.prototype.notifyChanged = function () {
-    var now = Date.now();
-    // Flip already painted → cut trail to minimum and evacuate after it
+  /**
+   * QR flip was painted. Sync job clocks to the real paint time so cover
+   * does not expire early when stabilize/busy delayed the frame.
+   */
+  MaskBalls.prototype.notifyChanged = function (opts) {
+    opts = opts || {};
+    var now = opts.flipAtMs != null ? opts.flipAtMs : Date.now();
+    var slot = opts.slot;
     for (var i = 0; i < this.balls.length; i++) {
       var ball = this.balls[i];
       var q = ball.queue || [];
       for (var j = 0; j < q.length; j++) {
-        if (q[j].changeAtMs <= now + 5) {
-          q[j].trailMs = Math.min(q[j].trailMs != null ? q[j].trailMs : COVER_TRAIL_MS, COVER_TRAIL_MS);
-          q[j].evacuateAfter = true;
-        }
+        var job = q[j];
+        var forThisFlip = (slot != null && job.slot === slot) ||
+          (!job.painted && job.changeAtMs <= now + 80);
+        if (!forThisFlip) continue;
+        job.painted = true;
+        job.changeAtMs = now; // real paint moment
+        job.trailMs = COVER_TRAIL_MS;
+        job.evacuateAfter = true;
+        job.locked = true;
       }
     }
     this.events = this.events.filter(function (ev) {
+      if (slot != null && ev.slot === slot) return false; // consumed
       var trail = ev.trailMs != null ? ev.trailMs : COVER_TRAIL_MS;
       return ev.changeAtMs + trail > now - 20;
     });
@@ -1241,8 +1286,7 @@
 
     while (ball.queue && ball.queue.length) {
       var head = ball.queue[0];
-      var trail = head.trailMs != null ? head.trailMs : COVER_TRAIL_MS;
-      if (now > head.changeAtMs + trail) {
+      if (!this.jobStillActive(head, now)) {
         ball.queue.shift();
         ball.needEvacuate = true;
         continue;
@@ -1301,28 +1345,43 @@
     var msToFlip = job.changeAtMs - now;
     var dist = hypot(ball.x - job.x, ball.y - job.y);
     var onDisc = dist + job.r <= BALL_R + 2;
-    var inCoverWindow = msToFlip <= COVER_HOLD_MS && msToFlip >= -trailMs;
+    // Waiting for late paint: treat as still in cover window past planned time
+    var waitingPaint = !job.painted && msToFlip < 0 && this.jobStillActive(job, now);
+    var inCoverWindow = (msToFlip <= COVER_HOLD_MS && msToFlip >= -trailMs) || waitingPaint;
 
-    // After flip + trail → evacuate (next job handled next frame)
-    if (msToFlip < -trailMs || (job.evacuateAfter && msToFlip < -trailMs)) {
+    // After painted flip + trail → evacuate (next job handled next frame)
+    if (job.painted && msToFlip < -trailMs) {
       ball.needEvacuate = true;
       this.evacuateFromQr(ball);
       return;
     }
 
-    // On disc around the flip: linger (slow) so modules stay covered
+    // On disc around the flip (or waiting for late paint): linger so modules stay covered
     if (onDisc && inCoverWindow) {
       ball.evacuating = false;
       ball.needEvacuate = false;
       ball.covering = true;
-      var remain = Math.max(0.05, (msToFlip + trailMs) / 1000);
+      var remain = waitingPaint
+        ? Math.max(0.12, this.paintGraceMs() / 1000)
+        : Math.max(0.05, (msToFlip + trailMs) / 1000);
       var linger = clamp((BALL_R * 0.45) / remain, MIN_SPEED, BASE_SPEED * 0.85);
       ball.targetSpeed = linger;
       ball.pendingAngle = null;
       ball.angleQueue = [];
       ball.postSpeed = null;
-      ball.planKind = "linger";
+      ball.planKind = waitingPaint ? "wait-paint" : "linger";
       ball.planMiss = Math.round(dist);
+      return;
+    }
+
+    // Past planned flip, not on disc yet, paint not confirmed → keep rushing in
+    if (waitingPaint && !onDisc) {
+      ball.evacuating = false;
+      ball.needEvacuate = false;
+      var rushPlan = this.planIntercept(ball, job, now + 120, now);
+      if (rushPlan) this.applyPlan(ball, rushPlan);
+      ball.targetSpeed = MAX_SPEED;
+      ball.planKind = "late-paint";
       return;
     }
 
@@ -1449,7 +1508,8 @@
       return a.changeAtMs - b.changeAtMs;
     });
     var iv = this.intervalMs || 1000;
-    var maxAhead = iv <= 1500 ? 2 : (iv <= 3000 ? 3 : 5);
+    // Next flip only (+ one lookahead). Far horizon steals balls from the imminent paint.
+    var maxAhead = 2;
     var horizonMs = iv * maxAhead + 80;
     events = events.filter(function (ev) {
       var eTrail = ev.trailMs != null ? ev.trailMs : COVER_TRAIL_MS;
@@ -1573,7 +1633,8 @@
             y: target.y,
             r: target.r,
             slot: ev.slot,
-            locked: this.jobIsLocked({ changeAtMs: ev.changeAtMs, trailMs: ev.trailMs }, now),
+            locked: this.jobIsLocked({ changeAtMs: ev.changeAtMs, trailMs: ev.trailMs, painted: false }, now),
+            painted: false,
             ballId: ball.colorId,
             cells: (target.cells || []).map(function (c) {
               return [c.row, c.col];
@@ -1923,11 +1984,19 @@
       for (var qi = 0; qi < q.length; qi++) {
         var a = q[qi];
         var trail = a.trailMs != null ? a.trailMs : COVER_TRAIL_MS;
-        if (now < a.changeAtMs - COVER_HOLD_MS || now > a.changeAtMs + trail) continue;
+        var inWin;
+        if (a.painted) {
+          inWin = now >= a.changeAtMs - COVER_HOLD_MS && now <= a.changeAtMs + trail;
+        } else {
+          // Unpainted: hold window through planned time + paint grace
+          inWin = now >= a.changeAtMs - COVER_HOLD_MS &&
+            now <= a.changeAtMs + this.paintGraceMs();
+        }
+        if (!inWin) continue;
         var dist = hypot(ball.x - a.x, ball.y - a.y);
         if (dist + a.r <= br + 2) covering = true;
       }
-      if (ball.planKind === "linger" && ball.covering) covering = true;
+      if ((ball.planKind === "linger" || ball.planKind === "wait-paint") && ball.covering) covering = true;
       ball.covering = covering;
     }
 

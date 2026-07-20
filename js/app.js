@@ -75,7 +75,7 @@
     prefetch: null,
     renderMode: "none",
     paintEl: null,
-    epochIntervalSec: 1,
+    epochIntervalSec: 5,
     maskBalls: null,
     pendingDiffs: null,
     forecastHorizon: 8,
@@ -744,8 +744,9 @@
     if (!state.api || !state.prevModules) return;
     cancelPrefetch();
     var interval = getEpochIntervalSec();
+    // With balls on: next flip is critical; 2–3 steps ahead is enough travel time
     var horizon = state.maskBalls && state.maskBalls.enabled
-      ? Math.max(3, state.forecastHorizon | 0)
+      ? Math.max(2, Math.min(3, state.forecastHorizon | 0))
       : 1;
     var nextSlot = slotJustShown + 1;
     var nextEpoch = nextSlot * interval;
@@ -1000,15 +1001,19 @@
     setStatus("ok", "ok");
 
     if (state.maskBalls && state.maskBalls.enabled) {
+      // Prefer the slot this frame was built for (paint can lag wall-clock)
+      var paintSlot = (fromPrefetch && state.prefetch && state.prefetch.slot != null)
+        ? state.prefetch.slot
+        : currentSlot();
       var flipReport = state.maskBalls.reportFlipCover({
         flipAtMs: flipAtMs,
-        slot: currentSlot(),
+        slot: paintSlot,
         epoch: decodedEpoch,
         diffs: flipDiffs,
         moduleSize: moduleSize(result.modules),
         margin: MARGIN
       });
-      state.maskBalls.notifyChanged();
+      state.maskBalls.notifyChanged({ slot: paintSlot, flipAtMs: flipAtMs });
       state.lastFlipReport = flipReport;
       setMeta(
         "d-flip",
@@ -1120,22 +1125,25 @@
     }
 
     if (intervalInput) {
-      state.epochIntervalSec = parseInt(intervalInput.value, 10) || 1;
+      state.epochIntervalSec = parseInt(intervalInput.value, 10) || 5;
       setMeta("d-interval", getEpochIntervalSec() + " s");
       intervalInput.addEventListener("change", function () {
-        state.epochIntervalSec = parseInt(intervalInput.value, 10) || 1;
+        state.epochIntervalSec = parseInt(intervalInput.value, 10) || 5;
         intervalInput.value = String(getEpochIntervalSec());
         setMeta("d-interval", getEpochIntervalSec() + " s");
         cancelPrefetch();
         state.lastSlot = "";
+        // Drop stale timed jobs — slot clock changed with the interval
+        if (state.maskBalls) state.maskBalls.clearAssignments();
         log("Epoch interval set", getEpochIntervalSec() + "s");
         tick();
       });
     }
 
     if (ballsToggle) {
-      ballsToggle.checked = false;
-      setMeta("d-balls", "off");
+      var ballsOn = !!ballsToggle.checked;
+      if (state.maskBalls) state.maskBalls.setEnabled(ballsOn);
+      setMeta("d-balls", ballsOn ? "on" : "off");
       ballsToggle.addEventListener("change", function () {
         var on = !!ballsToggle.checked;
         if (state.maskBalls) state.maskBalls.setEnabled(on);
