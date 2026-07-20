@@ -24,7 +24,7 @@ Na přijímací straně stačí po naskenování zavolat `decodePayload()` a pad
 
 ## Jak se drží minimální změna
 
-1. **Velký QR + ECC Q** – desktop **v40/Q**, mobil **v25/Q** (lehčí profil kvůli renderu/CPU).
+1. **Kompaktní QR** – maximálně **version 3** (29×29, ≈ 3 finder bloky na šířku), ECC **L**.
 2. **Dlouhý padding** – epoch je v dlouhém stringu, který vyplní kapacitu symbolu.
 3. **Structure-aware pad** – mutace hlavně **suffixu** padu (konec QR data bitstreamu / padding codewords).
 4. **Dual-direction ECC stabilizace** – from-old + from-new + mutace + polish, řazení diffů podle zigzag oblasti.
@@ -43,10 +43,9 @@ Hard floor: dvě různá QR data musí ležet v různých RS codeword basins; po
 
 ## Typická změna mezi snímky
 
-| profil | moduly (flips) | podíl | ~CSS px (QR ~360 px) |
-| --- | ---: | ---: | ---: |
-| desktop v40/Q | **~45–65** | **~0.15–0.20 %** | **~180–250 px** |
-| mobil v25/Q | ~50–60 | ~0.38–0.45 % | ~350–420 px |
+| profil | typicky |
+| --- | --- |
+| v3 / L | malý QR (29 modulů), méně hustý než dřívější v40 |
 
 Debug pole `~CSS px` ukazuje odhad podle aktuální velikosti QR na obrazovce.
 

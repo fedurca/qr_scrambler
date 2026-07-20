@@ -27,24 +27,72 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: flex-start;
+  gap: 16px;
+  padding: 72px 16px 96px;
+}
+
+#controls {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1200;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: center;
   justify-content: center;
-  gap: 20px;
-  padding: 24px 24px 120px;
+  padding: 10px 12px;
+  background: rgba(10, 10, 10, 0.94);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  font-size: 13px;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+#controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  padding: 6px 10px;
+  background: #161616;
+  border: 1px solid var(--border);
+}
+
+#controls input[type="number"] {
+  width: 4.2rem;
+  background: #000;
+  color: var(--fg);
+  border: 1px solid #444;
+  padding: 4px 6px;
+  font: inherit;
+}
+
+#controls input[type="checkbox"] {
+  width: 1.1rem;
+  height: 1.1rem;
+  accent-color: var(--ok);
 }
 
 main {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 20px;
-  width: min(100%, 360px);
+  gap: 14px;
+  width: min(100%, 280px);
+  margin-top: 8px;
 }
 
 #qr {
-  width: 100%;
+  width: min(100%, 240px);
   aspect-ratio: 1 / 1;
   background: #fff;
-  padding: 12px;
+  padding: 10px;
   display: block;
   position: relative;
   overflow: hidden;
@@ -77,44 +125,10 @@ main {
   margin: 0;
   width: 100%;
   text-align: center;
-  font-size: clamp(12px, 3.4vw, 15px);
+  font-size: clamp(11px, 3.2vw, 13px);
   line-height: 1.4;
   word-break: break-all;
   color: #d0d0d0;
-}
-
-#controls {
-  width: min(100%, 360px);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 16px;
-  align-items: center;
-  justify-content: center;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-#controls label {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-#controls input[type="number"] {
-  width: 4.2rem;
-  background: #111;
-  color: var(--fg);
-  border: 1px solid var(--border);
-  padding: 4px 6px;
-  font: inherit;
-}
-
-#controls input[type="checkbox"] {
-  width: 1rem;
-  height: 1rem;
 }
 
 #ball-layer {
@@ -186,7 +200,7 @@ main {
 #debug .body {
   display: none;
   padding: 10px;
-  max-height: 36vh;
+  max-height: 32vh;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
 }
@@ -210,7 +224,7 @@ main {
   border: 1px solid var(--border);
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 140px;
+  max-height: 120px;
   overflow: auto;
 }
 

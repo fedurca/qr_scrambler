@@ -19,14 +19,14 @@
     }
   })();
 
-  // Desktop keeps denser v40/Q; mobile uses lighter profile so first paint works.
-  var VERSION = IS_MOBILE ? 25 : 40;
-  var ECC = "Q";
+  // Max QR version 3 (29 modules ≈ 3 finder-sized blocks across).
+  var VERSION = 3;
+  var ECC = "L";
   var MARGIN = 2;
-  var DRAW_SIZE = IS_MOBILE ? 280 : 320;
-  var DECODE_SCALE = IS_MOBILE ? 2 : 1;
-  var STABILIZE_BUDGET_MS = IS_MOBILE ? 450 : 900;
-  var PREFETCH_BUDGET_MS = IS_MOBILE ? 700 : 1400;
+  var DRAW_SIZE = IS_MOBILE ? 220 : 240;
+  var DECODE_SCALE = 4;
+  var STABILIZE_BUDGET_MS = IS_MOBILE ? 350 : 500;
+  var PREFETCH_BUDGET_MS = IS_MOBILE ? 550 : 800;
   var PAD_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
   var SCRIPT_CANDIDATES = [
@@ -716,7 +716,7 @@
           height: DRAW_SIZE,
           colorDark: "#000000",
           colorLight: "#ffffff",
-          correctLevel: window.QRCode.CorrectLevel.Q
+          correctLevel: window.QRCode.CorrectLevel.L
         });
         state.renderMode = "qrcodejs-dom";
         setMeta("d-render", state.renderMode);
