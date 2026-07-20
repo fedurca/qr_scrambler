@@ -25,22 +25,27 @@
   // to capacity (see computePadLen), so payload never overflows — the only cost
   // of higher EC/version is module density, offset by a larger DRAW_SIZE.
   //
-  // Measured avg flips over sequential epochs (vm harness, jsQR-verified):
-  //   v3+L 28 (3.33%) · v4+Q 41 (3.76%) · v4+H 28 (2.57%) · v5+Q 30 (2.19%) · v5+H 35 (2.56%)
-  // v4+H gives the fewest absolute flips at the same 33x33 density we already
-  // ship, so it is the default. v5+Q has the lowest percentage if a denser
-  // (37x37) symbol is acceptable — switch here and confirm cheap-phone reading.
-  var VERSION = 4;
-  var ECC = "H";
+  // Measured avg flips at 1s cadence (epoch += 1) — full pipeline, jsQR-verified:
+  //   v2+L 15 (2.44%) · v6+M 26 (1.53%) · v5+Q 30 (2.22%) · v4+H 28 (2.57%) · v3+L 29 (3.44%)
+  // The dominant driver at 1s is Reed-Solomon diffusion: one changed epoch byte
+  // recomputes every EC codeword, so the floor is set by how few modules the
+  // symbol has. v2+L is the smallest symbol that still holds the payload, so it
+  // changes the FEWEST modules (~15 vs 28) and has the largest, most cheap-phone
+  // -readable modules. Trade-off: ECC-L has little reader headroom, so the in-QR
+  // arcade masks self-limit their ink (see mask-arcade). For the lowest CHANGE
+  // PERCENTAGE / smallest changed area instead, switch to { version: 6, ecc: "M" }
+  // (41x41, denser) or { version: 5, ecc: "Q" }.
+  var VERSION = 2;
+  var ECC = "L";
   var MARGIN = 2;
   var DRAW_SIZE = IS_MOBILE ? 260 : 300;
   var DECODE_SCALE = 4;
   /** Candidate profiles for the boot-time flip measurement (tuning aid only). */
   var GRID_PROFILES = [
-    { version: 4, ecc: "H" },
+    { version: 2, ecc: "L" },
+    { version: 6, ecc: "M" },
     { version: 5, ecc: "Q" },
-    { version: 5, ecc: "H" },
-    { version: 3, ecc: "L" }
+    { version: 4, ecc: "H" }
   ];
   var STABILIZE_BUDGET_MS = IS_MOBILE ? 350 : 500;
   var PREFETCH_BUDGET_MS = IS_MOBILE ? 550 : 800;
@@ -137,7 +142,7 @@
     var rect = getQrContentRect();
     if (!rect) return null;
     var size = state.prevModules ? moduleSize(state.prevModules) : (17 + 4 * VERSION);
-    return { rect: rect, size: size, margin: MARGIN };
+    return { rect: rect, size: size, margin: MARGIN, ecc: ECC };
   }
 
   function now() {
