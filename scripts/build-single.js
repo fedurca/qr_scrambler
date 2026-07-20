@@ -76,8 +76,13 @@ ${css}
         <option value="snow8">Statika</option>
         <option value="chg">Změny z N iterací</option>
         <option value="chgmin">Nejjemnější</option>
+        <option value="fade">Plynulá změna B/W</option>
         <option value="none">Žádné</option>
       </select>
+    </label>
+    <label>
+      Fade ms
+      <input id="fade-ms" type="number" min="0" max="2000" step="10" value="0" title="Délka plynulé změny B/W (0 = auto podle intervalu, URL: fadeMs / morph=300)" />
     </label>
     <label>
       Záznam s
@@ -116,6 +121,7 @@ ${css}
         <dt>rec</dt><dd id="d-rec">5 s</dd>
         <dt>settings URL</dt><dd id="d-settings">—</dd>
         <dt>mask</dt><dd id="d-mask">snow3</dd>
+        <dt>fade ms</dt><dd id="d-fadems">auto</dd>
         <dt>forecast</dt><dd id="d-forecast">—</dd>
         <dt>ball pos</dt><dd id="d-ballpos">—</dd>
         <dt>last flip</dt><dd id="d-flip">—</dd>

@@ -103,6 +103,7 @@
     lookupSteps: 6,
     noiseAmount: 0.5,
     changeAmount: 0.7,
+    fadeMs: 0, // 0 = auto from slot interval
     recSeconds: 5,
     futureDiffs: [],
     gentleMode: false,
@@ -121,7 +122,8 @@
   var MASK_URL_OPTIONS = [
     "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
     "chg", "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin", "none",
-    "balls", "crossfade", "shimmer", "softpatch", "snake", "tetris", "life", "snow"
+    "fade", "morph", "balls", "crossfade", "shimmer", "softpatch",
+    "snake", "tetris", "life", "snow"
   ];
 
   function clampInt(v, lo, hi, fallback) {
@@ -163,6 +165,22 @@
     return n;
   }
 
+  /** Morph duration for fade mask. 0 in state → auto (~75% of slot, 80–900 ms). */
+  function getFadeMs() {
+    var n = parseInt(state.fadeMs, 10);
+    if (isFinite(n) && n > 0) {
+      if (n < 40) return 40;
+      if (n > 2000) return 2000;
+      return n;
+    }
+    return Math.max(80, Math.min(900, Math.round(getStepMs() * 0.75)));
+  }
+
+  function isFadeMask(method) {
+    method = method || state.maskMethod;
+    return method === "fade" || method === "morph" || method === "crossfade";
+  }
+
   /** Read settings from the page URL (?rate=&lookup=&noise=&mask=&rec=&debug=). */
   function readUrlSettings() {
     var q;
@@ -191,8 +209,23 @@
     var mask = first(["mask", "method"]);
     if (mask != null) {
       mask = String(mask).trim().toLowerCase();
+      if (mask === "morph" || mask === "crossfade") mask = "fade";
       if (MASK_URL_OPTIONS.indexOf(mask) >= 0) out.mask = mask;
     }
+    // Optional: morph=1 enables the fade variant without setting mask= explicitly.
+    var morph = first(["morph", "fade"]);
+    if (morph != null && out.mask == null) {
+      var mv = String(morph).toLowerCase();
+      if (mv === "1" || mv === "true" || mv === "yes" || mv === "on") out.mask = "fade";
+      else if (mv === "0" || mv === "false" || mv === "off") { /* ignore */ }
+      else if (/^\d+$/.test(mv)) {
+        // morph=300 means enable fade with 300 ms duration
+        out.mask = "fade";
+        out.fadeMs = clampInt(mv, 0, 2000, 0);
+      }
+    }
+    var fadeMs = first(["fadeMs", "fadems", "morphMs", "morphms"]);
+    if (fadeMs != null) out.fadeMs = clampInt(fadeMs, 0, 2000, 0);
     var rec = first(["rec", "duration", "record"]);
     if (rec != null) out.rec = clampInt(rec, 1, 120, 5);
     var dbg = first(["debug"]);
@@ -211,6 +244,9 @@
     q.set("preview", String(Math.round(getChangeAmount() * 100)));
     q.set("goal", isBalanceGoal() ? "balance" : "min");
     q.set("mask", state.maskMethod || "snow3");
+    if (isFadeMask() || (state.fadeMs | 0) > 0) {
+      q.set("fadeMs", String(state.fadeMs | 0));
+    }
     q.set("rec", String(getRecSeconds()));
     if (debugEl && debugEl.classList.contains("open")) q.set("debug", "1");
     return q;
@@ -2100,6 +2136,7 @@
   }
 
   function applyMaskMethod(method, rebuild) {
+    if (method === "morph" || method === "crossfade") method = "fade";
     state.maskMethod = method;
     var ballsOn = method === "balls";
     // Legacy chg1–chg6 presets sync the lookup control; "chg" uses the control as-is.
@@ -2119,6 +2156,9 @@
     if (state.maskFx) state.maskFx.setMethod(method);
     setMeta("d-mask", method);
     setMeta("d-lookup", String(getLookupSteps()));
+    setMeta("d-fadems", isFadeMask(method)
+      ? ((state.fadeMs | 0) > 0 ? (state.fadeMs + " ms") : ("auto " + getFadeMs() + " ms"))
+      : "—");
     syncSettingsUrl();
     if (rebuild) {
       cancelPrefetch();
@@ -2146,6 +2186,7 @@
     var lookupInput = document.getElementById("forecast-steps");
     var noiseInput = document.getElementById("noise-amount");
     var changePctInput = document.getElementById("change-pct");
+    var fadeMsInput = document.getElementById("fade-ms");
     var recInput = document.getElementById("rec-seconds");
     var recordBtn = document.getElementById("btn-record");
 
@@ -2156,6 +2197,7 @@
     if (fromUrl.noise != null && noiseInput) noiseInput.value = String(fromUrl.noise);
     if (fromUrl.preview != null && changePctInput) changePctInput.value = String(fromUrl.preview);
     if (fromUrl.goal != null && goalSelect) goalSelect.value = fromUrl.goal;
+    if (fromUrl.fadeMs != null && fadeMsInput) fadeMsInput.value = String(fromUrl.fadeMs);
     if (fromUrl.rec != null && recInput) recInput.value = String(fromUrl.rec);
     if (fromUrl.mask != null && methodSelect) {
       var opt = methodSelect.querySelector('option[value="' + fromUrl.mask + '"]');
@@ -2194,6 +2236,7 @@
         getHorizon: function () { return getLookupSteps(); },
         getNoiseAmount: function () { return getNoiseAmount(); },
         getChangeAmount: function () { return getChangeAmount(); },
+        getFadeMs: function () { return getFadeMs(); },
         onLog: function (msg, detail) { log(msg, detail); }
       });
     }
@@ -2286,6 +2329,20 @@
         syncSettingsUrl();
         adjustLayout();
         tick();
+      });
+    }
+
+    if (fadeMsInput) {
+      state.fadeMs = clampInt(fadeMsInput.value, 0, 2000, 0);
+      fadeMsInput.value = String(state.fadeMs | 0);
+      setMeta("d-fadems", (state.fadeMs | 0) > 0 ? (state.fadeMs + " ms") : ("auto " + getFadeMs() + " ms"));
+      fadeMsInput.addEventListener("change", function () {
+        state.fadeMs = clampInt(fadeMsInput.value, 0, 2000, 0);
+        fadeMsInput.value = String(state.fadeMs | 0);
+        setMeta("d-fadems", (state.fadeMs | 0) > 0 ? (state.fadeMs + " ms") : ("auto " + getFadeMs() + " ms"));
+        log("Fade ms set", (state.fadeMs | 0) > 0 ? state.fadeMs : ("auto→" + getFadeMs()));
+        syncSettingsUrl();
+        adjustLayout();
       });
     }
 
@@ -2419,6 +2476,8 @@
       noiseAmount: Math.round(getNoiseAmount() * 100),
       changePct: Math.round(getChangeAmount() * 100),
       genGoal: state.genGoal,
+      fadeMs: state.fadeMs | 0,
+      fadeMsEffective: getFadeMs(),
       recSeconds: getRecSeconds(),
       settingsUrl: settingsUrlString(),
       fps: (document.getElementById("d-fps") || {}).textContent || null,

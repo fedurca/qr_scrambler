@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="application-version" content="1.15.0" />
-  <title>v1.15.0 het68 QR</title>
+  <meta name="application-version" content="1.16.0" />
+  <title>v1.16.0 het68 QR</title>
   <style>
 :root {
   color-scheme: dark;
@@ -342,8 +342,13 @@ main {
         <option value="snow8">Statika</option>
         <option value="chg">Změny z N iterací</option>
         <option value="chgmin">Nejjemnější</option>
+        <option value="fade">Plynulá změna B/W</option>
         <option value="none">Žádné</option>
       </select>
+    </label>
+    <label>
+      Fade ms
+      <input id="fade-ms" type="number" min="0" max="2000" step="10" value="0" title="Délka plynulé změny B/W (0 = auto podle intervalu, URL: fadeMs / morph=300)" />
     </label>
     <label>
       Záznam s
@@ -366,7 +371,7 @@ main {
     </header>
     <div class="body">
       <dl>
-        <dt>version</dt><dd id="d-version">1.15.0</dd>
+        <dt>version</dt><dd id="d-version">1.16.0</dd>
         <dt>engine</dt><dd id="d-engine">—</dd>
         <dt>source</dt><dd id="d-source">—</dd>
         <dt>decoder</dt><dd id="d-decoder">—</dd>
@@ -382,6 +387,7 @@ main {
         <dt>rec</dt><dd id="d-rec">5 s</dd>
         <dt>settings URL</dt><dd id="d-settings">—</dd>
         <dt>mask</dt><dd id="d-mask">snow3</dd>
+        <dt>fade ms</dt><dd id="d-fadems">auto</dd>
         <dt>forecast</dt><dd id="d-forecast">—</dd>
         <dt>ball pos</dt><dd id="d-ballpos">—</dd>
         <dt>last flip</dt><dd id="d-flip">—</dd>
@@ -10524,7 +10530,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
 });
   </script>
   <script>
-window.APP_VERSION="1.15.0";
+window.APP_VERSION="1.16.0";
 
   </script>
   <script>
@@ -13511,9 +13517,9 @@ window.APP_VERSION="1.15.0";
  * what we hide the transition from.
  *
  * Methods (all operate on a transparent canvas positioned over the QR):
- *  - crossfade (default): the changed cells ramp opacity prev -> new over
- *    ~260 ms; the swap is deferred behind the overlay (a natural paint gate),
- *    so there is never an instant pop. Robust, no fragile motion timing.
+ *  - fade / morph / crossfade: changed cells morph grayscale white↔black
+ *    (smoothstep) over a configurable duration; the real swap is deferred
+ *    until the morph finishes so there is never an instant pop.
  *  - shimmer: a permanent, very low-contrast dither across the whole symbol,
  *    so a real per-interval change vanishes into the ambient micro-motion.
  *  - softpatch: a muted, soft-edged blob in the code color briefly covers each
@@ -13539,6 +13545,7 @@ window.APP_VERSION="1.15.0";
     this.shimmerRaf = 0;
     this._shimmerLast = 0;
     this.getQrInfo = opts.getQrInfo || null;
+    this.getFadeMs = opts.getFadeMs || function () { return 260; };
     this.arcade = (typeof global.MaskArcade === "function")
       ? new global.MaskArcade({
           getQrInfo: this.getQrInfo,
@@ -13552,12 +13559,13 @@ window.APP_VERSION="1.15.0";
       : null;
   }
 
-  MaskFx.OPTIONS = ["crossfade", "balls", "shimmer", "softpatch", "snake", "tetris", "life",
+  MaskFx.OPTIONS = ["fade", "morph", "crossfade", "balls", "shimmer", "softpatch", "snake", "tetris", "life",
     "snow", "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
     "chg", "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin", "none"];
   MaskFx.ARCADE = ["snake", "tetris", "life", "snow",
     "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
     "chg", "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin"];
+  MaskFx.MORPH = ["fade", "morph", "crossfade"];
 
   MaskFx.prototype.ensureCanvas = function () {
     if (this.canvas) return this.canvas;
@@ -13603,7 +13611,9 @@ window.APP_VERSION="1.15.0";
   };
 
   MaskFx.prototype.setMethod = function (m) {
-    if (MaskFx.OPTIONS.indexOf(m) < 0) m = "crossfade";
+    if (MaskFx.OPTIONS.indexOf(m) < 0) m = "fade";
+    // Normalize aliases to the morph family.
+    if (m === "morph" || m === "crossfade") m = "fade";
     this.method = m;
     this.stopAnim();
     this.stopShimmer();
@@ -13615,9 +13625,13 @@ window.APP_VERSION="1.15.0";
     }
   };
 
+  MaskFx.prototype.isMorph = function () {
+    return MaskFx.MORPH.indexOf(this.method) >= 0 || this.method === "fade";
+  };
+
   /** The caller should defer the real module swap only for methods that fade it in. */
   MaskFx.prototype.wantsDeferredSwap = function () {
-    return this.method === "crossfade";
+    return this.isMorph();
   };
 
   MaskFx.prototype.usesBalls = function () {
@@ -13648,7 +13662,7 @@ window.APP_VERSION="1.15.0";
     var m = this.method;
     // Ambient methods (balls / shimmer / arcade) do not cover the changed cells
     // themselves — commit the swap immediately; the animation runs independently.
-    if (m !== "crossfade" && m !== "softpatch") {
+    if (!this.isMorph() && m !== "softpatch") {
       commit();
       return;
     }
@@ -13659,30 +13673,41 @@ window.APP_VERSION="1.15.0";
     }
     if (!this.positionOver(rect)) { commit(); return; }
 
-    if (m === "crossfade") this.playCrossfade(rect, cells, size, margin, commit);
+    if (this.isMorph()) this.playMorph(rect, cells, size, margin, commit);
     else if (m === "softpatch") this.playSoftPatch(rect, cells, size, margin, commit);
     else commit();
   };
 
-  MaskFx.prototype.playCrossfade = function (rect, cells, size, margin, commit) {
+  /**
+   * Smooth grayscale morph of each changed module from its previous color to the
+   * new one (white→black or black→white). Underlying QR stays on the previous
+   * frame until the morph finishes, then commit() paints the settled modules.
+   */
+  MaskFx.prototype.playMorph = function (rect, cells, size, margin, commit) {
     var self = this;
     var ctx = this.ctx;
     this.stopAnim();
     var start = 0;
-    var dur = 260;
+    var dur = Math.max(40, Math.min(2000, (this.getFadeMs && this.getFadeMs()) || 260));
     var committed = false;
     function step(ts) {
       if (!start) start = ts;
       var k = Math.min(1, (ts - start) / dur);
+      // Smoothstep — avoids a linear "digital" gray ramp that draws the eye.
+      var e = k * k * (3 - 2 * k);
       self.clear();
-      ctx.globalAlpha = k;
+      ctx.globalAlpha = 1;
       for (var i = 0; i < cells.length; i++) {
         var b = self.cellBox(rect, size, margin, cells[i][0], cells[i][1]);
-        ctx.fillStyle = cells[i][2] ? "#000000" : "#ffffff";
-        // pad by 0.75px to avoid seams between adjacent changed cells
+        // cells[i][2] = new bit (1=black). Old bit is the opposite.
+        var toBlack = !!cells[i][2];
+        var fromG = toBlack ? 255 : 0;
+        var toG = toBlack ? 0 : 255;
+        var g = Math.round(fromG + (toG - fromG) * e);
+        ctx.fillStyle = "rgb(" + g + "," + g + "," + g + ")";
+        // pad slightly to avoid seams between adjacent changed cells
         ctx.fillRect(b.x - 0.5, b.y - 0.5, b.w + 1, b.h + 1);
       }
-      ctx.globalAlpha = 1;
       if (k < 1) {
         self.anim = requestAnimationFrame(step);
       } else {
@@ -13692,6 +13717,11 @@ window.APP_VERSION="1.15.0";
       }
     }
     self.anim = requestAnimationFrame(step);
+  };
+
+  // Back-compat alias
+  MaskFx.prototype.playCrossfade = function (rect, cells, size, margin, commit) {
+    return this.playMorph(rect, cells, size, margin, commit);
   };
 
   MaskFx.prototype.playSoftPatch = function (rect, cells, size, margin, commit) {
@@ -13891,6 +13921,7 @@ window.APP_VERSION="1.15.0";
     lookupSteps: 6,
     noiseAmount: 0.5,
     changeAmount: 0.7,
+    fadeMs: 0, // 0 = auto from slot interval
     recSeconds: 5,
     futureDiffs: [],
     gentleMode: false,
@@ -13909,7 +13940,8 @@ window.APP_VERSION="1.15.0";
   var MASK_URL_OPTIONS = [
     "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
     "chg", "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin", "none",
-    "balls", "crossfade", "shimmer", "softpatch", "snake", "tetris", "life", "snow"
+    "fade", "morph", "balls", "crossfade", "shimmer", "softpatch",
+    "snake", "tetris", "life", "snow"
   ];
 
   function clampInt(v, lo, hi, fallback) {
@@ -13951,6 +13983,22 @@ window.APP_VERSION="1.15.0";
     return n;
   }
 
+  /** Morph duration for fade mask. 0 in state → auto (~75% of slot, 80–900 ms). */
+  function getFadeMs() {
+    var n = parseInt(state.fadeMs, 10);
+    if (isFinite(n) && n > 0) {
+      if (n < 40) return 40;
+      if (n > 2000) return 2000;
+      return n;
+    }
+    return Math.max(80, Math.min(900, Math.round(getStepMs() * 0.75)));
+  }
+
+  function isFadeMask(method) {
+    method = method || state.maskMethod;
+    return method === "fade" || method === "morph" || method === "crossfade";
+  }
+
   /** Read settings from the page URL (?rate=&lookup=&noise=&mask=&rec=&debug=). */
   function readUrlSettings() {
     var q;
@@ -13979,8 +14027,23 @@ window.APP_VERSION="1.15.0";
     var mask = first(["mask", "method"]);
     if (mask != null) {
       mask = String(mask).trim().toLowerCase();
+      if (mask === "morph" || mask === "crossfade") mask = "fade";
       if (MASK_URL_OPTIONS.indexOf(mask) >= 0) out.mask = mask;
     }
+    // Optional: morph=1 enables the fade variant without setting mask= explicitly.
+    var morph = first(["morph", "fade"]);
+    if (morph != null && out.mask == null) {
+      var mv = String(morph).toLowerCase();
+      if (mv === "1" || mv === "true" || mv === "yes" || mv === "on") out.mask = "fade";
+      else if (mv === "0" || mv === "false" || mv === "off") { /* ignore */ }
+      else if (/^\d+$/.test(mv)) {
+        // morph=300 means enable fade with 300 ms duration
+        out.mask = "fade";
+        out.fadeMs = clampInt(mv, 0, 2000, 0);
+      }
+    }
+    var fadeMs = first(["fadeMs", "fadems", "morphMs", "morphms"]);
+    if (fadeMs != null) out.fadeMs = clampInt(fadeMs, 0, 2000, 0);
     var rec = first(["rec", "duration", "record"]);
     if (rec != null) out.rec = clampInt(rec, 1, 120, 5);
     var dbg = first(["debug"]);
@@ -13999,6 +14062,9 @@ window.APP_VERSION="1.15.0";
     q.set("preview", String(Math.round(getChangeAmount() * 100)));
     q.set("goal", isBalanceGoal() ? "balance" : "min");
     q.set("mask", state.maskMethod || "snow3");
+    if (isFadeMask() || (state.fadeMs | 0) > 0) {
+      q.set("fadeMs", String(state.fadeMs | 0));
+    }
     q.set("rec", String(getRecSeconds()));
     if (debugEl && debugEl.classList.contains("open")) q.set("debug", "1");
     return q;
@@ -15888,6 +15954,7 @@ window.APP_VERSION="1.15.0";
   }
 
   function applyMaskMethod(method, rebuild) {
+    if (method === "morph" || method === "crossfade") method = "fade";
     state.maskMethod = method;
     var ballsOn = method === "balls";
     // Legacy chg1–chg6 presets sync the lookup control; "chg" uses the control as-is.
@@ -15907,6 +15974,9 @@ window.APP_VERSION="1.15.0";
     if (state.maskFx) state.maskFx.setMethod(method);
     setMeta("d-mask", method);
     setMeta("d-lookup", String(getLookupSteps()));
+    setMeta("d-fadems", isFadeMask(method)
+      ? ((state.fadeMs | 0) > 0 ? (state.fadeMs + " ms") : ("auto " + getFadeMs() + " ms"))
+      : "—");
     syncSettingsUrl();
     if (rebuild) {
       cancelPrefetch();
@@ -15934,6 +16004,7 @@ window.APP_VERSION="1.15.0";
     var lookupInput = document.getElementById("forecast-steps");
     var noiseInput = document.getElementById("noise-amount");
     var changePctInput = document.getElementById("change-pct");
+    var fadeMsInput = document.getElementById("fade-ms");
     var recInput = document.getElementById("rec-seconds");
     var recordBtn = document.getElementById("btn-record");
 
@@ -15944,6 +16015,7 @@ window.APP_VERSION="1.15.0";
     if (fromUrl.noise != null && noiseInput) noiseInput.value = String(fromUrl.noise);
     if (fromUrl.preview != null && changePctInput) changePctInput.value = String(fromUrl.preview);
     if (fromUrl.goal != null && goalSelect) goalSelect.value = fromUrl.goal;
+    if (fromUrl.fadeMs != null && fadeMsInput) fadeMsInput.value = String(fromUrl.fadeMs);
     if (fromUrl.rec != null && recInput) recInput.value = String(fromUrl.rec);
     if (fromUrl.mask != null && methodSelect) {
       var opt = methodSelect.querySelector('option[value="' + fromUrl.mask + '"]');
@@ -15982,6 +16054,7 @@ window.APP_VERSION="1.15.0";
         getHorizon: function () { return getLookupSteps(); },
         getNoiseAmount: function () { return getNoiseAmount(); },
         getChangeAmount: function () { return getChangeAmount(); },
+        getFadeMs: function () { return getFadeMs(); },
         onLog: function (msg, detail) { log(msg, detail); }
       });
     }
@@ -16074,6 +16147,20 @@ window.APP_VERSION="1.15.0";
         syncSettingsUrl();
         adjustLayout();
         tick();
+      });
+    }
+
+    if (fadeMsInput) {
+      state.fadeMs = clampInt(fadeMsInput.value, 0, 2000, 0);
+      fadeMsInput.value = String(state.fadeMs | 0);
+      setMeta("d-fadems", (state.fadeMs | 0) > 0 ? (state.fadeMs + " ms") : ("auto " + getFadeMs() + " ms"));
+      fadeMsInput.addEventListener("change", function () {
+        state.fadeMs = clampInt(fadeMsInput.value, 0, 2000, 0);
+        fadeMsInput.value = String(state.fadeMs | 0);
+        setMeta("d-fadems", (state.fadeMs | 0) > 0 ? (state.fadeMs + " ms") : ("auto " + getFadeMs() + " ms"));
+        log("Fade ms set", (state.fadeMs | 0) > 0 ? state.fadeMs : ("auto→" + getFadeMs()));
+        syncSettingsUrl();
+        adjustLayout();
       });
     }
 
@@ -16207,6 +16294,8 @@ window.APP_VERSION="1.15.0";
       noiseAmount: Math.round(getNoiseAmount() * 100),
       changePct: Math.round(getChangeAmount() * 100),
       genGoal: state.genGoal,
+      fadeMs: state.fadeMs | 0,
+      fadeMsEffective: getFadeMs(),
       recSeconds: getRecSeconds(),
       settingsUrl: settingsUrlString(),
       fps: (document.getElementById("d-fps") || {}).textContent || null,
