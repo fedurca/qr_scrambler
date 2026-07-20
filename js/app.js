@@ -132,6 +132,14 @@
     return el.getBoundingClientRect();
   }
 
+  /** QR geometry for module-aligned overlays (arcade masking draws inside this grid). */
+  function getQrInfo() {
+    var rect = getQrContentRect();
+    if (!rect) return null;
+    var size = state.prevModules ? moduleSize(state.prevModules) : (17 + 4 * VERSION);
+    return { rect: rect, size: size, margin: MARGIN };
+  }
+
   function now() {
     return new Date().toISOString().slice(11, 23);
   }
@@ -1429,6 +1437,7 @@
     if (typeof MaskFx === "function") {
       state.maskFx = new MaskFx({
         getQrRect: getQrContentRect,
+        getQrInfo: getQrInfo,
         onLog: function (msg, detail) { log(msg, detail); }
       });
     }

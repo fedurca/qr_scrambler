@@ -33,13 +33,14 @@
     this.anim = 0;
     this.shimmerRaf = 0;
     this._shimmerLast = 0;
+    this.getQrInfo = opts.getQrInfo || null;
     this.arcade = (typeof global.MaskArcade === "function")
-      ? new global.MaskArcade({ getQrRect: this.getQrRect })
+      ? new global.MaskArcade({ getQrInfo: this.getQrInfo, getQrRect: this.getQrRect })
       : null;
   }
 
-  MaskFx.OPTIONS = ["crossfade", "balls", "shimmer", "softpatch", "snake", "tetris", "life", "none"];
-  MaskFx.ARCADE = ["snake", "tetris", "life"];
+  MaskFx.OPTIONS = ["crossfade", "balls", "shimmer", "softpatch", "snake", "tetris", "life", "snow", "none"];
+  MaskFx.ARCADE = ["snake", "tetris", "life", "snow"];
 
   MaskFx.prototype.ensureCanvas = function () {
     if (this.canvas) return this.canvas;
