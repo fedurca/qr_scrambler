@@ -1,6 +1,6 @@
 {
   "name": "qr_scrambler",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "private": true,
   "description": "Min-change epoch QR scrambler (het68)",
   "scripts": {

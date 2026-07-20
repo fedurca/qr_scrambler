@@ -1227,7 +1227,7 @@
   });
 
   if (window.APP_VERSION) {
-    document.title = "het68 QR v" + window.APP_VERSION;
+    document.title = "v" + window.APP_VERSION + " het68 QR";
     var verEl = document.getElementById("d-version");
     if (verEl) verEl.textContent = window.APP_VERSION;
   }

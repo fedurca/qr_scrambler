@@ -33,19 +33,21 @@
   var MAX_SPEED = 980;
   var BASE_SPEED = 320;
   var SPEED_JITTER = 50;
-  var MAX_ACCEL = 1500; // px/s² — linear speed changes only
-  /** Start intercept early so the ball is on-station before the flip. */
-  var COVER_LEAD_MS = 280;
-  /** Must be geometrically covering this long before the flip. */
-  var COVER_HOLD_MS = 90;
-  /** Leave almost immediately once the flip is done. */
-  var COVER_TRAIL_MS = 40;
+  var MAX_ACCEL = 2200; // px/s² — linear speed changes only
+  /** Soft hint only — intercept runs for the whole job lifetime. */
+  var COVER_LEAD_MS = 400;
+  /** Be on the disc this long before the flip (linger via slowdown). */
+  var COVER_HOLD_MS = 120;
+  /** Leave soon after the flip is painted. */
+  var COVER_TRAIL_MS = 50;
+  /** Aim to arrive this early so HOLD window is non-empty. */
+  var ARRIVE_EARLY_MS = 110;
   /** Unfold images / bounce depth for route search. */
   var AIM_LOOKAHEAD_BOUNCES = 8;
   var MAX_PLAN_BOUNCES = 3;
-  var MAX_TARGETS = 7;
-  /** Cluster disc must fit inside the ball so a centered hit fully covers modules. */
-  var MAX_TARGET_R = BALL_R - 8;
+  var MAX_TARGETS = 10;
+  /** Cluster disc must fit inside the ball with aim slack (dist ≤ BALL_R − MAX_TARGET_R). */
+  var MAX_TARGET_R = BALL_R - 16;
   var QR_CLEAR_PAD = 28;
   /** Throttle for live plan/position debug dumps. */
   var DEBUG_SNAP_MS = 220;
@@ -493,8 +495,7 @@
     if (!this.balls.length) this.spawnPalette();
 
     if (!qr || !events || !events.length) {
-      this.events = [];
-      this.clearAssignments();
+      // Do not wipe in-flight queues on empty push — keep last good forecast
       return;
     }
 
@@ -506,6 +507,7 @@
     for (var i = 0; i < events.length; i++) {
       var ev = events[i];
       if (!ev.diffs || !ev.diffs.length) continue;
+      // Keep events still in cover window; skip only fully expired flips
       if (ev.changeAtMs + trailMs < now - 30) continue;
       var targets = this.clusterDiffs(ev.diffs, ev, qr);
       if (!targets.length) continue;
@@ -519,6 +521,11 @@
         diffs: ev.diffs.slice(0, 40),
         targets: targets
       });
+    }
+    if (!built.length) {
+      // Incoming horizon is entirely past — preserve current queues/events
+      this.pruneBallQueues(now);
+      return;
     }
     this.events = built;
     this.assignAndAim(now);
@@ -833,8 +840,23 @@
    * Speeding up reaches the wall sooner (same ray → earlier bounce).
    */
   MaskBalls.prototype.planIntercept = function (ball, target, changeAtMs, now) {
-    var tHit = (changeAtMs - now) / 1000;
-    if (tHit < 0.04) return null;
+    // Arrive early so the ball is already on-disc during COVER_HOLD
+    var arriveAt = changeAtMs - ARRIVE_EARLY_MS;
+    if (arriveAt < now + 40) arriveAt = changeAtMs;
+    var tHit = (arriveAt - now) / 1000;
+    if (tHit < 0.04) {
+      // Too late for timed intercept — rush toward target now
+      tHit = Math.max(0.06, (changeAtMs - now) / 1000);
+      if (tHit < 0.04) return {
+        pendingAngle: null,
+        angleQueue: [],
+        targetSpeed: MAX_SPEED,
+        postSpeed: null,
+        score: 2000,
+        kind: "rush",
+        miss: hypot(ball.x - target.x, ball.y - target.y)
+      };
+    }
 
     var sp = hypot(ball.vx, ball.vy) || ball.speed;
     var ux = ball.vx / sp;
@@ -994,17 +1016,38 @@
     }
 
     if (!candidates.length && nb) {
-      // Rush to wall, aim toward nearest image; late cover better than none
-      var late = this.bestImageAim(nb.x, nb.y, target, Math.max(0.12, tHit * 0.45), ball);
+      // Rush to wall, aim toward nearest image; also score predicted miss at flip
+      var late = this.bestImageAim(nb.x, nb.y, target, Math.max(0.12, tHit * 0.55), ball);
       var direct = hypot(target.x - nb.x, target.y - nb.y);
+      var lateAng = late ? late.ang : Math.atan2(target.y - nb.y, target.x - nb.x);
+      var latePost = late ? late.speed : clamp(direct / Math.max(0.08, tHit * 0.55), MIN_SPEED, MAX_SPEED);
+      var lateGhost = {
+        x: nb.x,
+        y: nb.y,
+        vx: Math.cos(lateAng) * latePost,
+        vy: Math.sin(lateAng) * latePost,
+        r: BALL_R,
+        speed: latePost
+      };
+      var tWall = this.timeToTravelAccel(nb.t * BASE_SPEED, sp, MAX_SPEED);
+      var lateMiss = 9999;
+      if (tWall < tHit) {
+        var foldLate = this.predictAt(lateGhost, tHit - tWall, latePost, null, []);
+        lateMiss = hypot(foldLate.x - target.x, foldLate.y - target.y);
+      } else {
+        // Wall after flip: closest approach along current/max-speed ray
+        var rush = this.predictAt(ball, tHit, MAX_SPEED, null, []);
+        lateMiss = hypot(rush.x - target.x, rush.y - target.y);
+      }
       candidates.push({
-        pendingAngle: late ? late.ang : Math.atan2(target.y - nb.y, target.x - nb.x),
+        pendingAngle: lateAng,
         angleQueue: [],
         targetSpeed: MAX_SPEED,
-        postSpeed: late ? late.speed : clamp(direct / Math.max(0.08, tHit * 0.45), MIN_SPEED, MAX_SPEED),
-        score: 1400 + direct * 0.12,
+        postSpeed: latePost,
+        score: 800 + lateMiss,
         kind: "late",
-        bounces: late ? 1 + late.bounces : 1
+        bounces: late ? 1 + late.bounces : 1,
+        miss: lateMiss
       });
     }
 
@@ -1019,11 +1062,15 @@
     return best;
   };
 
-  /** Per-frame refine: intercept only when due → brief cover → evacuate QR. */
+  /**
+   * Per-frame refine:
+   * - With a job: ALWAYS intercept (never evacuate away from the target before trail ends)
+   * - On disc near flip: slow down to linger through HOLD+TRAIL
+   * - After trail: evacuate QR ASAP
+   */
   MaskBalls.prototype.refineAim = function (ball, now) {
     var qr = this.getQrRect() || this.qrRect;
 
-    // Drop finished mask jobs
     while (ball.queue && ball.queue.length) {
       var head = ball.queue[0];
       var trail = head.trailMs != null ? head.trailMs : COVER_TRAIL_MS;
@@ -1036,61 +1083,89 @@
     }
 
     var job = ball.queue && ball.queue[0] ? ball.queue[0] : null;
-    var msToNext = job ? job.changeAtMs - now : Infinity;
-    // Dynamic approach window: just enough travel time + slack, then leave again after flip
-    var approachMs = COVER_LEAD_MS + 100;
-    if (job) {
-      var travelPx = hypot(ball.x - job.x, ball.y - job.y);
-      var needMs = (travelPx / Math.max(MIN_SPEED, MAX_SPEED * 0.85)) * 1000 + 220;
-      approachMs = clamp(needMs, COVER_LEAD_MS + 80, 1600);
-    }
-    var coverImminent = job && msToNext <= approachMs;
+    var trailMs = job && job.trailMs != null ? job.trailMs : COVER_TRAIL_MS;
 
-    // Past flip (or job finished) → leave QR immediately unless next cover is imminent
-    if (
-      ball.needEvacuate ||
-      (job && now >= job.changeAtMs + (job.trailMs != null ? job.trailMs : COVER_TRAIL_MS)) ||
-      (job && job.evacuateAfter && now >= job.changeAtMs + (job.trailMs || COVER_TRAIL_MS))
-    ) {
-      ball.needEvacuate = true;
-    }
-
-    if (ball.needEvacuate && !coverImminent) {
-      this.evacuateFromQr(ball);
-      if (!this.overlapsQr(ball, qr, QR_CLEAR_PAD)) ball.needEvacuate = false;
-      return;
-    }
-
-    if (!job || !coverImminent) {
-      if (this.overlapsQr(ball, qr, QR_CLEAR_PAD)) {
+    // No job: leave QR / cruise
+    if (!job) {
+      if (ball.needEvacuate || this.overlapsQr(ball, qr, QR_CLEAR_PAD)) {
         this.evacuateFromQr(ball);
+        if (!this.overlapsQr(ball, qr, QR_CLEAR_PAD)) ball.needEvacuate = false;
       } else {
         ball.evacuating = false;
         ball.needEvacuate = false;
-        if (!job) {
-          ball.targetSpeed = clamp(BASE_SPEED + (Math.random() * 2 - 1) * 25, MIN_SPEED, MAX_SPEED);
-        }
+        ball.targetSpeed = clamp(BASE_SPEED + (Math.random() * 2 - 1) * 25, MIN_SPEED, MAX_SPEED);
       }
       return;
     }
 
-    // Cover imminent: intercept target. Once on disc after changeAt → evacuate.
-    if (now >= job.changeAtMs) {
-      var dist = hypot(ball.x - job.x, ball.y - job.y);
-      if (dist + job.r <= BALL_R + 1 || now >= job.changeAtMs + (job.trailMs || COVER_TRAIL_MS)) {
-        ball.needEvacuate = true;
-        this.evacuateFromQr(ball);
-        return;
-      }
+    var msToFlip = job.changeAtMs - now;
+    var dist = hypot(ball.x - job.x, ball.y - job.y);
+    var onDisc = dist + job.r <= BALL_R + 2;
+    var inCoverWindow = msToFlip <= COVER_HOLD_MS && msToFlip >= -trailMs;
+
+    // After flip + trail → evacuate (next job handled next frame)
+    if (msToFlip < -trailMs || (job.evacuateAfter && msToFlip < -trailMs)) {
+      ball.needEvacuate = true;
+      this.evacuateFromQr(ball);
+      return;
     }
 
+    // On disc around the flip: linger (slow) so modules stay covered
+    if (onDisc && inCoverWindow) {
+      ball.evacuating = false;
+      ball.needEvacuate = false;
+      ball.covering = true;
+      var remain = Math.max(0.05, (msToFlip + trailMs) / 1000);
+      var linger = clamp((BALL_R * 0.45) / remain, MIN_SPEED, BASE_SPEED * 0.85);
+      ball.targetSpeed = linger;
+      ball.pendingAngle = null;
+      ball.angleQueue = [];
+      ball.postSpeed = null;
+      ball.planKind = "linger";
+      ball.planMiss = Math.round(dist);
+      return;
+    }
+
+    // Approaching disc: if already close before HOLD, slow slightly and keep intercept
+    if (onDisc && msToFlip > COVER_HOLD_MS && msToFlip < COVER_HOLD_MS + 280) {
+      ball.evacuating = false;
+      ball.targetSpeed = clamp(BASE_SPEED * 0.55, MIN_SPEED, BASE_SPEED);
+      // Keep a light plan so direction stays good after bounce
+      var earlyPlan = this.planIntercept(ball, job, job.changeAtMs, now);
+      if (earlyPlan && earlyPlan.pendingAngle != null) this.applyPlan(ball, earlyPlan);
+      else ball.planKind = "prelinger";
+      return;
+    }
+
+    // Active job: always intercept — do NOT evacuate just because we overlap QR
+    ball.evacuating = false;
+    ball.needEvacuate = false;
     var plan = this.planIntercept(ball, job, job.changeAtMs, now);
     if (!plan) {
+      // Fallback: rush toward target via next bounce
       ball.targetSpeed = MAX_SPEED;
+      var probe = {
+        x: ball.x,
+        y: ball.y,
+        vx: ball.vx,
+        vy: ball.vy,
+        r: BALL_R,
+        speed: ball.speed
+      };
+      var nb = this.nextBounce(probe, 20);
+      if (nb) {
+        ball.pendingAngle = Math.atan2(job.y - nb.y, job.x - nb.x);
+        ball.postSpeed = MAX_SPEED;
+      }
       return;
     }
-    ball.evacuating = false;
     this.applyPlan(ball, plan);
+
+    // If plan is late/poor and flip is soon, force max speed
+    if ((plan.kind === "late" || plan.kind === "rush" || (plan.miss != null && plan.miss > BALL_R)) &&
+        msToFlip < 900) {
+      ball.targetSpeed = MAX_SPEED;
+    }
   };
 
   MaskBalls.prototype.applyPlan = function (ball, plan) {
@@ -1160,18 +1235,23 @@
               pendingAngle: null,
               targetSpeed: ball.speed,
               score: 0,
-              kind: "on-track"
+              kind: "on-track",
+              miss: 0
             };
-            score = plan.score - 15;
+            score = plan.score - 40;
           } else {
             plan = this.planIntercept(ball, target, ev.changeAtMs, now);
             if (!plan) continue;
             score = plan.score + 20;
           }
           // Prefer free balls / fewer queued jobs for later horizon steps
-          score += (ball.queue.length || 0) * 8;
-          // Prefer reachable soon (lower miss)
-          if (plan.miss != null) score += plan.miss * 0.35;
+          score += (ball.queue.length || 0) * 12;
+          // Hard preference: predicted miss at arrive time
+          if (plan.miss != null) score += plan.miss * 1.1;
+          else score += 500;
+          if (plan.kind === "late" || plan.kind === "rush") score += 350;
+          // Prefer balls already nearer the target disc
+          score += hypot(ball.x - target.x, ball.y - target.y) * 0.08;
           if (score < chosenScore) {
             chosenScore = score;
             chosen = bi;
@@ -1538,11 +1618,11 @@
       for (var qi = 0; qi < q.length; qi++) {
         var a = q[qi];
         var trail = a.trailMs != null ? a.trailMs : COVER_TRAIL_MS;
-        // Tight station window around the flip (not the whole approach lead)
         if (now < a.changeAtMs - COVER_HOLD_MS || now > a.changeAtMs + trail) continue;
         var dist = hypot(ball.x - a.x, ball.y - a.y);
-        if (dist + a.r <= br + 1) covering = true;
+        if (dist + a.r <= br + 2) covering = true;
       }
+      if (ball.planKind === "linger" && ball.covering) covering = true;
       ball.covering = covering;
     }
 

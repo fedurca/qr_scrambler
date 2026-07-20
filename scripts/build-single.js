@@ -30,7 +30,7 @@ var html = `<!DOCTYPE html>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="application-version" content="${version}" />
-  <title>het68 QR v${version}</title>
+  <title>v${version} het68 QR</title>
   <style>
 ${css}
   </style>
