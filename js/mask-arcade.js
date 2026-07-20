@@ -20,7 +20,8 @@
   var STEP_MS = {
     snake: 110, tetris: 130, life: 160, snow: 120,
     snow1: 100, snow2: 100, snow3: 110, snow4: 100, snow5: 90,
-    snow6: 100, snow7: 90, snow8: 80
+    snow6: 100, snow7: 90, snow8: 80,
+    chg1: 110, chg2: 110, chg3: 110, chg4: 110, chg5: 110, chg6: 110
   };
   var INK = "#000000";
 
@@ -44,8 +45,10 @@
   }
 
   MaskArcade.MODES = ["snake", "tetris", "life", "snow",
-    "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8"];
-  MaskArcade.FLICKER = ["snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8"];
+    "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
+    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6"];
+  MaskArcade.FLICKER = ["snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
+    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6"];
 
   // Safe overlaid-module fraction by ECC level: the reader must still correct the
   // overlaid cells as errors, so keep well under floor(EC/2). Roughly half the
@@ -325,13 +328,17 @@
   // real change blends into ongoing flicker; each variant adds different decoys.
   // Never exceeds perFrameCap inked cells → always decodable.
   MaskArcade.prototype.newFlicker = function (mode) {
-    var v = parseInt(mode.slice(4), 10) || 1;
+    // "chgN" = preview the union of the next N iterations' changes (falling-snow
+    // decoy style). "snowN" = single-iteration variant N.
+    var isChg = mode.indexOf("chg") === 0;
+    var v = isChg ? 3 : (parseInt(mode.slice(4), 10) || 1);
+    var horizon = isChg ? (parseInt(mode.slice(3), 10) || 1) : 1;
     var flakes = [];
     if (v === 3) {
       var n = Math.max(4, (this.size * 0.35) | 0);
       for (var i = 0; i < n; i++) flakes.push({ x: (Math.random() * this.size) | 0, y: Math.random() * this.size, v: 0.5 + Math.random() });
     }
-    return { variant: v, scanRow: 0, phase: 0, flakes: flakes };
+    return { variant: v, horizon: horizon, scanRow: 0, phase: 0, flakes: flakes };
   };
 
   MaskArcade.prototype.stepFlicker = function () {
@@ -407,7 +414,7 @@
     this.beginInk();
     var st = this.state;
     var cap = this.perFrameCap;
-    var changing = this.getChangingCells() || [];
+    var changing = this.getChangingCells(st.horizon || 1) || [];
     var changingSet = {};
     for (var ci = 0; ci < changing.length; ci++) changingSet[changing[ci][0] + "," + changing[ci][1]] = 1;
     var seen = {};

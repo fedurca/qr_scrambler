@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="application-version" content="1.8.0" />
-  <title>v1.8.0 het68 QR</title>
+  <meta name="application-version" content="1.9.0" />
+  <title>v1.9.0 het68 QR</title>
   <style>
 :root {
   color-scheme: dark;
@@ -297,6 +297,12 @@ main {
         <option value="snow6">Kamufláž (změny + stejné)</option>
         <option value="snow7">Interlace</option>
         <option value="snow8">Statika</option>
+        <option value="chg1">Změny z 1 iterace</option>
+        <option value="chg2">Změny z 2 iterací</option>
+        <option value="chg3">Změny z 3 iterací</option>
+        <option value="chg4">Změny z 4 iterací</option>
+        <option value="chg5">Změny z 5 iterací</option>
+        <option value="chg6">Změny z 6 iterací</option>
         <option value="none">Žádné</option>
       </select>
     </label>
@@ -316,7 +322,7 @@ main {
     </header>
     <div class="body">
       <dl>
-        <dt>version</dt><dd id="d-version">1.8.0</dd>
+        <dt>version</dt><dd id="d-version">1.9.0</dd>
         <dt>engine</dt><dd id="d-engine">—</dd>
         <dt>source</dt><dd id="d-source">—</dd>
         <dt>decoder</dt><dd id="d-decoder">—</dd>
@@ -10466,7 +10472,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
 });
   </script>
   <script>
-window.APP_VERSION="1.8.0";
+window.APP_VERSION="1.9.0";
 
   </script>
   <script>
@@ -12731,7 +12737,8 @@ window.APP_VERSION="1.8.0";
   var STEP_MS = {
     snake: 110, tetris: 130, life: 160, snow: 120,
     snow1: 100, snow2: 100, snow3: 110, snow4: 100, snow5: 90,
-    snow6: 100, snow7: 90, snow8: 80
+    snow6: 100, snow7: 90, snow8: 80,
+    chg1: 110, chg2: 110, chg3: 110, chg4: 110, chg5: 110, chg6: 110
   };
   var INK = "#000000";
 
@@ -12755,8 +12762,10 @@ window.APP_VERSION="1.8.0";
   }
 
   MaskArcade.MODES = ["snake", "tetris", "life", "snow",
-    "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8"];
-  MaskArcade.FLICKER = ["snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8"];
+    "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
+    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6"];
+  MaskArcade.FLICKER = ["snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
+    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6"];
 
   // Safe overlaid-module fraction by ECC level: the reader must still correct the
   // overlaid cells as errors, so keep well under floor(EC/2). Roughly half the
@@ -13036,13 +13045,17 @@ window.APP_VERSION="1.8.0";
   // real change blends into ongoing flicker; each variant adds different decoys.
   // Never exceeds perFrameCap inked cells → always decodable.
   MaskArcade.prototype.newFlicker = function (mode) {
-    var v = parseInt(mode.slice(4), 10) || 1;
+    // "chgN" = preview the union of the next N iterations' changes (falling-snow
+    // decoy style). "snowN" = single-iteration variant N.
+    var isChg = mode.indexOf("chg") === 0;
+    var v = isChg ? 3 : (parseInt(mode.slice(4), 10) || 1);
+    var horizon = isChg ? (parseInt(mode.slice(3), 10) || 1) : 1;
     var flakes = [];
     if (v === 3) {
       var n = Math.max(4, (this.size * 0.35) | 0);
       for (var i = 0; i < n; i++) flakes.push({ x: (Math.random() * this.size) | 0, y: Math.random() * this.size, v: 0.5 + Math.random() });
     }
-    return { variant: v, scanRow: 0, phase: 0, flakes: flakes };
+    return { variant: v, horizon: horizon, scanRow: 0, phase: 0, flakes: flakes };
   };
 
   MaskArcade.prototype.stepFlicker = function () {
@@ -13118,7 +13131,7 @@ window.APP_VERSION="1.8.0";
     this.beginInk();
     var st = this.state;
     var cap = this.perFrameCap;
-    var changing = this.getChangingCells() || [];
+    var changing = this.getChangingCells(st.horizon || 1) || [];
     var changingSet = {};
     for (var ci = 0; ci < changing.length; ci++) changingSet[changing[ci][0] + "," + changing[ci][1]] = 1;
     var seen = {};
@@ -13242,9 +13255,11 @@ window.APP_VERSION="1.8.0";
   }
 
   MaskFx.OPTIONS = ["crossfade", "balls", "shimmer", "softpatch", "snake", "tetris", "life",
-    "snow", "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8", "none"];
+    "snow", "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
+    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "none"];
   MaskFx.ARCADE = ["snake", "tetris", "life", "snow",
-    "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8"];
+    "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
+    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6"];
 
   MaskFx.prototype.ensureCanvas = function () {
     if (this.canvas) return this.canvas;
@@ -13573,6 +13588,8 @@ window.APP_VERSION="1.8.0";
     maskBalls: null,
     maskFx: null,
     maskMethod: "snow3",
+    forecastSteps: 1,
+    futureDiffs: [],
     pendingDiffs: null,
     forecastHorizon: 8,
     lastPlanSnap: null
@@ -14513,7 +14530,7 @@ window.APP_VERSION="1.8.0";
     // With balls on: next flip is critical; 2–3 steps ahead is enough travel time
     var horizon = state.maskBalls && state.maskBalls.enabled
       ? Math.max(2, Math.min(3, state.forecastHorizon | 0))
-      : 1;
+      : Math.max(1, Math.min(6, state.forecastSteps | 0 || 1));
     var nextSlot = slotJustShown + 1;
     var nextEpoch = nextSlot * interval;
     var token = {
@@ -14567,6 +14584,9 @@ window.APP_VERSION="1.8.0";
           margin: MARGIN,
           diffs: diffs
         });
+        // Expose the multi-step change sets to the mask each step (progressive).
+        state.futureDiffs = events.map(function (e) { return e.diffs || []; });
+        if (events[0] && events[0].diffs) state.pendingDiffs = events[0].diffs;
         // Push partial forecast early so balls can start aiming while later steps compute
         if (!token.cancelled && (step === 1 || step === 3 || step === horizon)) {
           if (events[0] && events[0].diffs) state.pendingDiffs = events[0].diffs;
@@ -14895,13 +14915,37 @@ window.APP_VERSION="1.8.0";
       });
   }
 
+  /** Union of the first n forecast iterations' diff cells (module [row,col]). */
+  function unionFutureDiffs(n) {
+    var fd = state.futureDiffs || [];
+    var lim = Math.min(n, fd.length);
+    if (lim <= 1) return fd[0] || state.pendingDiffs || [];
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < lim; i++) {
+      var arr = fd[i] || [];
+      for (var j = 0; j < arr.length; j++) {
+        var rc = arr[j];
+        var k = rc[0] + "," + rc[1];
+        if (seen[k]) continue;
+        seen[k] = 1;
+        out.push(rc);
+      }
+    }
+    return out;
+  }
+
   function applyMaskMethod(method, rebuild) {
     state.maskMethod = method;
     var ballsOn = method === "balls";
+    // "chgN" variants pre-blink changes across the next N iterations → need an
+    // N-step forecast horizon.
+    var chg = /^chg([1-6])$/.exec(method);
+    state.forecastSteps = chg ? parseInt(chg[1], 10) : 1;
     if (state.maskBalls) state.maskBalls.setEnabled(ballsOn);
     if (state.maskFx) state.maskFx.setMethod(method);
     setMeta("d-mask", method);
-    if (ballsOn && rebuild) {
+    if (rebuild) {
       cancelPrefetch();
       startPrefetch(currentSlot());
     }
@@ -14935,9 +14979,10 @@ window.APP_VERSION="1.8.0";
       state.maskFx = new MaskFx({
         getQrRect: getQrContentRect,
         getQrInfo: getQrInfo,
-        // Cells (module [row,col]) that will flip in the upcoming iteration — the
-        // snow variants pre-blink these so the real change blends into the flicker.
-        getChangingCells: function () { return state.pendingDiffs || []; },
+        // Union of module [row,col] cells that will flip over the next `n`
+        // iterations (from the multi-step forecast). Snow variants pre-blink
+        // these so the real change blends into the flicker.
+        getChangingCells: function (n) { return unionFutureDiffs(n || 1); },
         onLog: function (msg, detail) { log(msg, detail); }
       });
     }

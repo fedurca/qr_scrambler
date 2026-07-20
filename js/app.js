@@ -98,6 +98,8 @@
     maskBalls: null,
     maskFx: null,
     maskMethod: "snow3",
+    forecastSteps: 1,
+    futureDiffs: [],
     pendingDiffs: null,
     forecastHorizon: 8,
     lastPlanSnap: null
@@ -1038,7 +1040,7 @@
     // With balls on: next flip is critical; 2–3 steps ahead is enough travel time
     var horizon = state.maskBalls && state.maskBalls.enabled
       ? Math.max(2, Math.min(3, state.forecastHorizon | 0))
-      : 1;
+      : Math.max(1, Math.min(6, state.forecastSteps | 0 || 1));
     var nextSlot = slotJustShown + 1;
     var nextEpoch = nextSlot * interval;
     var token = {
@@ -1092,6 +1094,9 @@
           margin: MARGIN,
           diffs: diffs
         });
+        // Expose the multi-step change sets to the mask each step (progressive).
+        state.futureDiffs = events.map(function (e) { return e.diffs || []; });
+        if (events[0] && events[0].diffs) state.pendingDiffs = events[0].diffs;
         // Push partial forecast early so balls can start aiming while later steps compute
         if (!token.cancelled && (step === 1 || step === 3 || step === horizon)) {
           if (events[0] && events[0].diffs) state.pendingDiffs = events[0].diffs;
@@ -1420,13 +1425,37 @@
       });
   }
 
+  /** Union of the first n forecast iterations' diff cells (module [row,col]). */
+  function unionFutureDiffs(n) {
+    var fd = state.futureDiffs || [];
+    var lim = Math.min(n, fd.length);
+    if (lim <= 1) return fd[0] || state.pendingDiffs || [];
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < lim; i++) {
+      var arr = fd[i] || [];
+      for (var j = 0; j < arr.length; j++) {
+        var rc = arr[j];
+        var k = rc[0] + "," + rc[1];
+        if (seen[k]) continue;
+        seen[k] = 1;
+        out.push(rc);
+      }
+    }
+    return out;
+  }
+
   function applyMaskMethod(method, rebuild) {
     state.maskMethod = method;
     var ballsOn = method === "balls";
+    // "chgN" variants pre-blink changes across the next N iterations → need an
+    // N-step forecast horizon.
+    var chg = /^chg([1-6])$/.exec(method);
+    state.forecastSteps = chg ? parseInt(chg[1], 10) : 1;
     if (state.maskBalls) state.maskBalls.setEnabled(ballsOn);
     if (state.maskFx) state.maskFx.setMethod(method);
     setMeta("d-mask", method);
-    if (ballsOn && rebuild) {
+    if (rebuild) {
       cancelPrefetch();
       startPrefetch(currentSlot());
     }
@@ -1460,9 +1489,10 @@
       state.maskFx = new MaskFx({
         getQrRect: getQrContentRect,
         getQrInfo: getQrInfo,
-        // Cells (module [row,col]) that will flip in the upcoming iteration — the
-        // snow variants pre-blink these so the real change blends into the flicker.
-        getChangingCells: function () { return state.pendingDiffs || []; },
+        // Union of module [row,col] cells that will flip over the next `n`
+        // iterations (from the multi-step forecast). Snow variants pre-blink
+        // these so the real change blends into the flicker.
+        getChangingCells: function (n) { return unionFutureDiffs(n || 1); },
         onLog: function (msg, detail) { log(msg, detail); }
       });
     }
