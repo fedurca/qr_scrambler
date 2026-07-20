@@ -78,8 +78,24 @@ Každý snímek se inkoustí jen **ne-rezervované datové moduly** (nikdy finde
 - **Dopředný lookup** (1–30) – počet iterací forecastu / chg / chgmin výhledu
 - **Šum %** (0–100) – množství maskovacích návnad (0 ≈ jen změny, 100 = plný čitelný cap)
 - **Maskování** – varianty předblikávání měněných modulů (default Změny + sníh)
+- **Záznam s** + **Export videa** – klientský záznam QR oblasti (včetně maskovacích overlayů) přes `MediaRecorder` → stažení `.webm`/`.mp4`; délka 1–120 s
 - title stránky nese semver (`het68 QR vX.Y.Z`, viz `package.json`)
-- debug: version, engine, decoder, ecc/ver, **FPS min/avg/max**, lookup, noise, mask, epoch, raw Δ, flips, %, ~CSS px
+- debug: version, engine, decoder, ecc/ver, **FPS min/avg/max**, lookup, noise, rec, settings URL, mask, epoch, raw Δ, flips, %, ~CSS px
+
+### URL parametry nastavení
+
+Všechny ovládací prvky jdou sdílet v query stringu stránky (při změně se `history.replaceState` aktualizuje):
+
+| param | význam | rozsah / hodnoty |
+| --- | --- | --- |
+| `rate` (alias `cps`, `changes`) | změn za vteřinu | 1–1000 |
+| `lookup` (alias `forecast`, `steps`) | dopředný lookup | 1–30 |
+| `noise` | šum % | 0–100 |
+| `mask` (alias `method`) | metoda maskování | `snow3`, `chg`, `chgmin`, … |
+| `rec` (alias `duration`, `record`) | délka videoexportu [s] | 1–120 |
+| `debug` | otevřít debug panel | `1` / `true` |
+
+Příklad: `/?rate=10&lookup=8&noise=40&mask=snow2&rec=15`
 
 ## Deploy / self-contained `index.html`
 

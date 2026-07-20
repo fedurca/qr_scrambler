@@ -68,6 +68,11 @@ ${css}
         <option value="none">Žádné</option>
       </select>
     </label>
+    <label>
+      Záznam s
+      <input id="rec-seconds" type="number" min="1" max="120" step="1" value="5" title="Délka videoexportu QR oblasti (sekundy)" />
+    </label>
+    <button type="button" id="btn-record" title="Stáhnout video QR oblasti (včetně maskování)">Export videa</button>
   </section>
 
   <main>
@@ -94,6 +99,8 @@ ${css}
         <dt>FPS min/avg/max</dt><dd id="d-fps">—</dd>
         <dt>lookup</dt><dd id="d-lookup">6</dd>
         <dt>noise</dt><dd id="d-noise">50%</dd>
+        <dt>rec</dt><dd id="d-rec">5 s</dd>
+        <dt>settings URL</dt><dd id="d-settings">—</dd>
         <dt>mask</dt><dd id="d-mask">snow3</dd>
         <dt>forecast</dt><dd id="d-forecast">—</dd>
         <dt>ball pos</dt><dd id="d-ballpos">—</dd>

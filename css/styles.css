@@ -93,6 +93,30 @@ body {
   cursor: pointer;
 }
 
+#controls button {
+  font: inherit;
+  color: var(--fg);
+  background: #1a1a1a;
+  border: 1px solid #555;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+#controls button:hover {
+  background: #242424;
+}
+
+#controls button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+#controls button.recording {
+  border-color: #a33;
+  color: #f2b0b0;
+  background: #2a1212;
+}
+
 #mask-fx-canvas {
   position: fixed;
   pointer-events: none;
