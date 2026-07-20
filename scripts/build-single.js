@@ -23,6 +23,7 @@ var versionJs = "window.APP_VERSION=" + JSON.stringify(version) + ";\n";
 var codec = read("js/codec.js");
 var qrStructure = read("js/qr-structure.js");
 var maskBalls = read("js/mask-balls.js");
+var maskArcade = read("js/mask-arcade.js");
 var maskMethods = read("js/mask-methods.js");
 var app = read("js/app.js");
 
@@ -50,6 +51,9 @@ ${css}
         <option value="balls">Koule</option>
         <option value="shimmer">Shimmer</option>
         <option value="softpatch">Měkká záplata</option>
+        <option value="snake">Snake</option>
+        <option value="tetris">Tetris</option>
+        <option value="life">Game of Life</option>
         <option value="none">Žádné</option>
       </select>
     </label>
@@ -120,6 +124,9 @@ ${qrStructure}
   </script>
   <script>
 ${maskBalls}
+  </script>
+  <script>
+${maskArcade}
   </script>
   <script>
 ${maskMethods}

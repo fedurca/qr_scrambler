@@ -33,9 +33,13 @@
     this.anim = 0;
     this.shimmerRaf = 0;
     this._shimmerLast = 0;
+    this.arcade = (typeof global.MaskArcade === "function")
+      ? new global.MaskArcade({ getQrRect: this.getQrRect })
+      : null;
   }
 
-  MaskFx.OPTIONS = ["crossfade", "balls", "shimmer", "softpatch", "none"];
+  MaskFx.OPTIONS = ["crossfade", "balls", "shimmer", "softpatch", "snake", "tetris", "life", "none"];
+  MaskFx.ARCADE = ["snake", "tetris", "life"];
 
   MaskFx.prototype.ensureCanvas = function () {
     if (this.canvas) return this.canvas;
@@ -86,12 +90,10 @@
     this.stopAnim();
     this.stopShimmer();
     this.clear();
+    if (this.arcade) this.arcade.setMode(MaskFx.ARCADE.indexOf(m) >= 0 ? m : null);
     if (m === "shimmer") {
       this.ensureCanvas();
       this.startShimmer();
-    } else if (this.canvas) {
-      // Keep the element but idle it
-      this.clear();
     }
   };
 
@@ -126,7 +128,9 @@
    */
   MaskFx.prototype.present = function (cells, size, margin, commit) {
     var m = this.method;
-    if (m === "balls" || m === "none" || m === "shimmer") {
+    // Ambient methods (balls / shimmer / arcade) do not cover the changed cells
+    // themselves — commit the swap immediately; the animation runs independently.
+    if (m !== "crossfade" && m !== "softpatch") {
       commit();
       return;
     }
@@ -255,6 +259,7 @@
     this.stopAnim();
     this.stopShimmer();
     this.clear();
+    if (this.arcade) this.arcade.dispose();
   };
 
   global.MaskFx = MaskFx;

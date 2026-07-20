@@ -94,6 +94,12 @@ body {
   z-index: 30;
 }
 
+#mask-arcade-canvas {
+  position: fixed;
+  pointer-events: none;
+  z-index: 20;
+}
+
 main {
   display: flex;
   flex-direction: column;
