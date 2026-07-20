@@ -98,6 +98,7 @@
     maskBalls: null,
     maskFx: null,
     maskMethod: "snow3",
+    genGoal: "min",
     forecastSteps: 6,
     lookupSteps: 6,
     noiseAmount: 0.5,
@@ -181,6 +182,12 @@
     if (noise != null) out.noise = clampInt(noise, 0, 100, 50);
     var preview = first(["preview", "chgPct", "changepct", "next"]);
     if (preview != null) out.preview = clampInt(preview, 0, 100, 70);
+    var goal = first(["goal", "objective"]);
+    if (goal != null) {
+      goal = String(goal).trim().toLowerCase();
+      if (goal === "balance" || goal === "bw" || goal === "density") out.goal = "balance";
+      else if (goal === "min" || goal === "minchange" || goal === "flips") out.goal = "min";
+    }
     var mask = first(["mask", "method"]);
     if (mask != null) {
       mask = String(mask).trim().toLowerCase();
@@ -202,6 +209,7 @@
     q.set("lookup", String(getLookupSteps()));
     q.set("noise", String(Math.round(getNoiseAmount() * 100)));
     q.set("preview", String(Math.round(getChangeAmount() * 100)));
+    q.set("goal", isBalanceGoal() ? "balance" : "min");
     q.set("mask", state.maskMethod || "snow3");
     q.set("rec", String(getRecSeconds()));
     if (debugEl && debugEl.classList.contains("open")) q.set("debug", "1");
@@ -725,6 +733,92 @@
     return listDiffs(a, b).length;
   }
 
+  /** Generation objective: "min" (fewest flips) or "balance" (regional B/W). */
+  function isBalanceGoal() {
+    return state.genGoal === "balance";
+  }
+
+  /**
+   * Per-tile black fraction over NON-reserved data modules.
+   * Used by the "balance" goal to keep every region near 50/50 and to
+   * minimize proportional density drift between consecutive frames.
+   */
+  var BALANCE_TILES = 3;
+
+  function regionalDensity(modules, tiles) {
+    tiles = tiles || BALANCE_TILES;
+    var size = moduleSize(modules);
+    var n = tiles * tiles;
+    var black = new Float64Array(n);
+    var total = new Float64Array(n);
+    var cell = size / tiles;
+    var r, c, tr, tc, idx;
+    for (r = 0; r < size; r++) {
+      for (c = 0; c < size; c++) {
+        if (moduleReserved(modules, r, c)) continue;
+        tr = Math.min(tiles - 1, (r / cell) | 0);
+        tc = Math.min(tiles - 1, (c / cell) | 0);
+        idx = tr * tiles + tc;
+        total[idx] += 1;
+        if (moduleGet(modules, r, c)) black[idx] += 1;
+      }
+    }
+    var fracs = new Float64Array(n);
+    for (idx = 0; idx < n; idx++) {
+      fracs[idx] = total[idx] > 0 ? black[idx] / total[idx] : 0.5;
+    }
+    return { fracs: fracs, n: n };
+  }
+
+  /** Lower is better. evenness→0.5, spread→uniform across tiles, change→small Δ. */
+  function scoreRegionalBalance(modules, prevModules) {
+    var cur = regionalDensity(modules, BALANCE_TILES);
+    var evenness = 0;
+    var spread = 0;
+    var change = 0;
+    var mean = 0;
+    var i, f;
+    for (i = 0; i < cur.n; i++) mean += cur.fracs[i];
+    mean /= Math.max(1, cur.n);
+    for (i = 0; i < cur.n; i++) {
+      f = cur.fracs[i];
+      evenness += Math.abs(f - 0.5);
+      spread += Math.abs(f - mean);
+    }
+    if (prevModules) {
+      var prev = regionalDensity(prevModules, BALANCE_TILES);
+      for (i = 0; i < cur.n; i++) {
+        var pf = prev.fracs[i];
+        var df = Math.abs(cur.fracs[i] - pf);
+        // Proportional to how filled the previous region was (and its complement).
+        var denom = Math.max(0.08, Math.min(pf, 1 - pf) * 2 + 0.08);
+        change += df / denom;
+      }
+    }
+    evenness /= Math.max(1, cur.n);
+    spread /= Math.max(1, cur.n);
+    change /= Math.max(1, cur.n);
+    return {
+      evenness: evenness,
+      spread: spread,
+      change: change,
+      total: evenness * 1.0 + spread * 0.85 + change * 1.4
+    };
+  }
+
+  /** Compare two search candidates. Returns true if `a` should replace `best`. */
+  function isBetterSearch(raw, balTotal, bestRaw, bestBal) {
+    if (bestRaw == null) return true;
+    if (isBalanceGoal()) {
+      if (balTotal < bestBal - 1e-9) return true;
+      if (Math.abs(balTotal - bestBal) <= 1e-9 && raw < bestRaw) return true;
+      return false;
+    }
+    if (raw < bestRaw) return true;
+    if (raw === bestRaw && balTotal < bestBal - 1e-9) return true;
+    return false;
+  }
+
   function shuffleInPlace(arr) {
     for (var i = arr.length - 1; i > 0; i--) {
       var j = (Math.random() * (i + 1)) | 0;
@@ -971,8 +1065,33 @@
   function considerCandidate(best, modules, targetUrl, prev, tag) {
     if (decodeModules(modules) !== targetUrl) return best;
     var flips = hamming(prev, modules);
-    if (!best || flips < best.flips) {
-      return { flips: flips, modules: copyModules(modules), tag: tag || (best && best.tag) || "stabilize" };
+    var bal = scoreRegionalBalance(modules, prev).total;
+    if (!best) {
+      return {
+        flips: flips,
+        bal: bal,
+        modules: copyModules(modules),
+        tag: tag || "stabilize"
+      };
+    }
+    if (isBalanceGoal()) {
+      if (bal < best.bal - 1e-9 || (Math.abs(bal - best.bal) <= 1e-9 && flips < best.flips)) {
+        return {
+          flips: flips,
+          bal: bal,
+          modules: copyModules(modules),
+          tag: tag || (best.tag) || "stabilize"
+        };
+      }
+      return best;
+    }
+    if (flips < best.flips || (flips === best.flips && bal < (best.bal != null ? best.bal : 1e9))) {
+      return {
+        flips: flips,
+        bal: bal,
+        modules: copyModules(modules),
+        tag: tag || (best.tag) || "stabilize"
+      };
     }
     return best;
   }
@@ -1065,7 +1184,12 @@
 
     var started = Date.now();
     var deadline = started + budgetMs;
-    var best = { flips: listDiffs(prev, neu).length, modules: copyModules(neu), tag: "canonical" };
+    var best = {
+      flips: listDiffs(prev, neu).length,
+      bal: scoreRegionalBalance(neu, prev).total,
+      modules: copyModules(neu),
+      tag: "canonical"
+    };
     var orders = 0;
     var size = moduleSize(neu);
 
@@ -1169,8 +1293,9 @@
       var url = buildUrl(epoch, pad);
       var modules = createModules(api, url, mask);
       var raw = prevModules ? listDiffs(prevModules, modules).length : 0;
-      if (!best || raw < best.raw) {
-        best = { url: url, pad: pad, mask: mask, modules: modules, raw: raw };
+      var bal = scoreRegionalBalance(modules, prevModules).total;
+      if (!best || isBetterSearch(raw, bal, best.raw, best.bal)) {
+        best = { url: url, pad: pad, mask: mask, modules: modules, raw: raw, bal: bal };
       }
     }
 
@@ -1191,20 +1316,24 @@
   }
 
   /**
-   * Hill-climb the free pad to minimize the raw module distance to prev for a
-   * fixed mask. The pad occupies free data codewords, so aligning it with the
-   * previous frame directly shrinks the forced changes before RS sacrifice.
-   * Objective is raw Hamming (cheap, strong proxy for post-sacrifice flips).
+   * Hill-climb the free pad for a fixed QR mask.
+   * Default goal: minimize raw Hamming to prev (proxy for post-sacrifice flips).
+   * Balance goal: minimize regional B/W imbalance + proportional density drift
+   * (raw Hamming is the tie-breaker).
    */
   function optimizePad(api, epoch, prevModules, startPad, mask, deadline, shouldCancel) {
     var pad = startPad || "";
     var url = buildUrl(epoch, pad);
     var mods = createModules(api, url, mask);
     var bestRaw = listDiffs(prevModules, mods).length;
+    var bestBal = scoreRegionalBalance(mods, prevModules).total;
     var len = pad.length;
-    if (len === 0) return { pad: pad, url: url, mask: mask, modules: mods, raw: bestRaw };
+    if (len === 0) {
+      return { pad: pad, url: url, mask: mask, modules: mods, raw: bestRaw, bal: bestBal };
+    }
     var stale = 0;
-    var cap = len * 4;
+    // Balance needs more exploration — density landscape is less locally smooth.
+    var cap = len * (isBalanceGoal() ? 7 : 4);
     while (Date.now() < deadline && stale < cap) {
       if (shouldCancel && shouldCancel()) break;
       var pos = (Math.random() * len) | 0;
@@ -1214,8 +1343,10 @@
       var turl = buildUrl(epoch, trialPad);
       var tmods = createModules(api, turl, mask);
       var raw = listDiffs(prevModules, tmods).length;
-      if (raw < bestRaw) {
+      var bal = scoreRegionalBalance(tmods, prevModules).total;
+      if (isBetterSearch(raw, bal, bestRaw, bestBal)) {
         bestRaw = raw;
+        bestBal = bal;
         pad = trialPad;
         url = turl;
         mods = tmods;
@@ -1224,7 +1355,7 @@
         stale += 1;
       }
     }
-    return { pad: pad, url: url, mask: mask, modules: mods, raw: bestRaw };
+    return { pad: pad, url: url, mask: mask, modules: mods, raw: bestRaw, bal: bestBal };
   }
 
   /**
@@ -1238,11 +1369,18 @@
     function consider(pad, mask) {
       var url = buildUrl(epoch, pad);
       var modules = createModules(api, url, mask);
-      all.push({ url: url, pad: pad, mask: mask, modules: modules, raw: listDiffs(prevModules, modules).length });
+      var raw = listDiffs(prevModules, modules).length;
+      var bal = scoreRegionalBalance(modules, prevModules).total;
+      all.push({ url: url, pad: pad, mask: mask, modules: modules, raw: raw, bal: bal });
+    }
+    function rank(a, b) {
+      return isBalanceGoal()
+        ? (a.bal - b.bal) || (a.raw - b.raw)
+        : (a.raw - b.raw) || (a.bal - b.bal);
     }
     var mask;
     for (mask = 0; mask < 8; mask++) consider(startPad, mask);
-    all.sort(function (a, b) { return a.raw - b.raw; });
+    all.sort(rank);
     var m0 = all[0].mask;
 
     // Hill-climb the pad on the best starting mask for the bulk of the budget.
@@ -1250,7 +1388,7 @@
     // Re-scan masks on the optimized pad (mask shifts the whole data pattern).
     for (mask = 0; mask < 8; mask++) consider(opt.pad, mask);
 
-    all.sort(function (a, b) { return a.raw - b.raw; });
+    all.sort(rank);
     var seen = {};
     var out = [];
     for (var i = 0; i < all.length && out.length < (topN || 3); i++) {
@@ -1262,14 +1400,17 @@
     return out;
   }
 
-  /** Min-raw-diff mask for a FIXED pad (no pad mutation) — used by sub-second frames. */
+  /** Best mask for a FIXED pad (no pad mutation) — used by sub-second frames. */
   function scanMask(api, epoch, pad, prevModules) {
     var best = null;
     for (var mask = 0; mask < 8; mask++) {
       var url = buildUrl(epoch, pad);
       var modules = createModules(api, url, mask);
       var raw = prevModules ? listDiffs(prevModules, modules).length : 0;
-      if (!best || raw < best.raw) best = { url: url, pad: pad, mask: mask, modules: modules, raw: raw };
+      var bal = scoreRegionalBalance(modules, prevModules).total;
+      if (!best || isBetterSearch(raw, bal, best.raw, best.bal)) {
+        best = { url: url, pad: pad, mask: mask, modules: modules, raw: raw, bal: bal };
+      }
     }
     return best;
   }
@@ -1313,17 +1454,23 @@
     var perBudget = Math.max(80, Math.floor((deadlineAll - Date.now()) / cands.length));
     var bestCanon = null;
     var bestRes = null;
+    var bestBal = null;
     for (var i = 0; i < cands.length; i++) {
       if (shouldCancel && shouldCancel()) break;
       var remaining = deadlineAll - Date.now();
       if (remaining <= 40 && bestRes) break;
       var b = Math.max(60, Math.min(perBudget, remaining));
       var res = await stabilize(prevModules, cands[i].modules, cands[i].url, b, shouldCancel);
-      if (!bestRes || res.flips < bestRes.flips) {
+      var bal = scoreRegionalBalance(res.modules, prevModules).total;
+      res.bal = bal;
+      if (!bestRes || isBetterSearch(res.flips, bal, bestRes.flips, bestBal)) {
         bestRes = res;
         bestCanon = cands[i];
+        bestBal = bal;
       }
-      if (bestRes.flips <= 2) break; // already near-optimal
+      // Early exit: min-flip near-optimal, or balance already very even with few flips.
+      if (!isBalanceGoal() && bestRes.flips <= 2) break;
+      if (isBalanceGoal() && bestBal < 0.04 && bestRes.flips <= 8) break;
     }
     if (!bestRes) {
       bestCanon = cands[0];
@@ -1802,6 +1949,15 @@
     setMeta("d-pct", pct + "%");
     setMeta("d-csspx", String(estimateCssPx(result.flips, result.modules)));
     setMeta("d-interval", getRate() + " /s");
+    setMeta("d-goal", isBalanceGoal() ? "balance" : "min");
+    var balScore = scoreRegionalBalance(result.modules, prevForDiff);
+    setMeta(
+      "d-balance",
+      "e" + balScore.evenness.toFixed(3) +
+        " s" + balScore.spread.toFixed(3) +
+        " Δ" + balScore.change.toFixed(3) +
+        " Σ" + balScore.total.toFixed(3)
+    );
 
     state.renders += 1;
     setMeta("d-renders", String(state.renders));
@@ -1986,6 +2142,7 @@
   function bindControls() {
     var rateInput = document.getElementById("changes-per-sec");
     var methodSelect = document.getElementById("mask-method");
+    var goalSelect = document.getElementById("gen-goal");
     var lookupInput = document.getElementById("forecast-steps");
     var noiseInput = document.getElementById("noise-amount");
     var changePctInput = document.getElementById("change-pct");
@@ -1998,6 +2155,7 @@
     if (fromUrl.lookup != null && lookupInput) lookupInput.value = String(fromUrl.lookup);
     if (fromUrl.noise != null && noiseInput) noiseInput.value = String(fromUrl.noise);
     if (fromUrl.preview != null && changePctInput) changePctInput.value = String(fromUrl.preview);
+    if (fromUrl.goal != null && goalSelect) goalSelect.value = fromUrl.goal;
     if (fromUrl.rec != null && recInput) recInput.value = String(fromUrl.rec);
     if (fromUrl.mask != null && methodSelect) {
       var opt = methodSelect.querySelector('option[value="' + fromUrl.mask + '"]');
@@ -2111,6 +2269,23 @@
         log("Change preview % set", c + "%");
         syncSettingsUrl();
         adjustLayout();
+      });
+    }
+
+    if (goalSelect) {
+      state.genGoal = goalSelect.value === "balance" ? "balance" : "min";
+      goalSelect.value = state.genGoal;
+      setMeta("d-goal", state.genGoal);
+      goalSelect.addEventListener("change", function () {
+        state.genGoal = goalSelect.value === "balance" ? "balance" : "min";
+        goalSelect.value = state.genGoal;
+        setMeta("d-goal", state.genGoal);
+        cancelPrefetch();
+        state.lastSlot = "";
+        log("Generation goal set", state.genGoal);
+        syncSettingsUrl();
+        adjustLayout();
+        tick();
       });
     }
 
@@ -2243,6 +2418,7 @@
       lookupSteps: getLookupSteps(),
       noiseAmount: Math.round(getNoiseAmount() * 100),
       changePct: Math.round(getChangeAmount() * 100),
+      genGoal: state.genGoal,
       recSeconds: getRecSeconds(),
       settingsUrl: settingsUrlString(),
       fps: (document.getElementById("d-fps") || {}).textContent || null,

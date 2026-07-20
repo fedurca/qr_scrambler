@@ -57,6 +57,13 @@ ${css}
       <input id="change-pct" type="number" min="0" max="100" step="1" value="70" title="Náhodný podíl buněk z příští iterace, které se předblikávají (0 = žádné, 100 = všechny až do čitelného capu)" />
     </label>
     <label>
+      Cíl
+      <select id="gen-goal" title="Cíl generování QR: min. flips, nebo vyvážení černá/bílá po oblastech">
+        <option value="min" selected>Min. změny</option>
+        <option value="balance">Vyvážení B/W</option>
+      </select>
+    </label>
+    <label>
       Maskování
       <select id="mask-method">
         <option value="snow3" selected>Změny + sníh</option>
@@ -104,6 +111,8 @@ ${css}
         <dt>lookup</dt><dd id="d-lookup">6</dd>
         <dt>noise</dt><dd id="d-noise">50%</dd>
         <dt>change %</dt><dd id="d-changepct">70%</dd>
+        <dt>goal</dt><dd id="d-goal">min</dd>
+        <dt>balance</dt><dd id="d-balance">—</dd>
         <dt>rec</dt><dd id="d-rec">5 s</dd>
         <dt>settings URL</dt><dd id="d-settings">—</dd>
         <dt>mask</dt><dd id="d-mask">snow3</dd>
