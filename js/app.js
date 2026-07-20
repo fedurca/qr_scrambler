@@ -98,15 +98,65 @@
     maskBalls: null,
     maskFx: null,
     maskMethod: "snow3",
-    forecastSteps: 1,
+    forecastSteps: 6,
+    lookupSteps: 6,
+    noiseAmount: 0.5,
     futureDiffs: [],
     gentleMode: false,
     gentleCells: [],
     _gentleAt: 0,
     pendingDiffs: null,
     forecastHorizon: 8,
-    lastPlanSnap: null
+    lastPlanSnap: null,
+    fpsSamples: [],
+    fpsLastPaint: 0
   };
+
+  var FPS_WINDOW = 60;
+
+  function getLookupSteps() {
+    var n = parseInt(state.lookupSteps, 10);
+    if (!isFinite(n) || n < 1) return 1;
+    if (n > 30) return 30;
+    return n;
+  }
+
+  function getNoiseAmount() {
+    var a = state.noiseAmount;
+    if (!isFinite(a)) return 0.5;
+    if (a < 0) return 0;
+    if (a > 1) return 1;
+    return a;
+  }
+
+  /** Record QR paint timing → rolling min / avg / max FPS in debug. */
+  function notePaintFps() {
+    var t = (typeof performance !== "undefined" && performance.now)
+      ? performance.now()
+      : Date.now();
+    if (state.fpsLastPaint > 0) {
+      var dt = t - state.fpsLastPaint;
+      // Ignore huge gaps (tab hidden / first frames after pause).
+      if (dt > 2 && dt < 8000) {
+        state.fpsSamples.push(1000 / dt);
+        if (state.fpsSamples.length > FPS_WINDOW) state.fpsSamples.shift();
+        var s = state.fpsSamples;
+        var min = s[0], max = s[0], sum = 0;
+        for (var i = 0; i < s.length; i++) {
+          if (s[i] < min) min = s[i];
+          if (s[i] > max) max = s[i];
+          sum += s[i];
+        }
+        var avg = sum / s.length;
+        setMeta(
+          "d-fps",
+          min.toFixed(1) + " / " + avg.toFixed(1) + " / " + max.toFixed(1) +
+            " (n=" + s.length + ")"
+        );
+      }
+    }
+    state.fpsLastPaint = t;
+  }
 
   // Updates per second (1..1000). >1 means the QR re-scrambles multiple times per
   // second: the numeric epoch stays in whole seconds (so a scanner reads the right
@@ -548,6 +598,7 @@
       try {
         chain[i](modules);
         setMeta("d-render", state.renderMode);
+        notePaintFps();
         return;
       } catch (e) {
         errors.push((chain[i].name || "draw") + ": " + (e && e.message ? e.message : e));
@@ -1125,7 +1176,7 @@
     // With balls on: next flip is critical; 2–3 steps ahead is enough travel time
     var horizon = state.maskBalls && state.maskBalls.enabled
       ? Math.max(2, Math.min(3, state.forecastHorizon | 0))
-      : Math.max(1, Math.min(6, state.forecastSteps | 0 || 1));
+      : Math.max(1, Math.min(30, getLookupSteps()));
     var nextSlot = slotJustShown + 1;
     var token = {
       cancelled: false,
@@ -1191,9 +1242,10 @@
       }
 
       // Gentlest-transition outlook (throttled — the ranking drifts slowly).
+      // Lookup steps come from the UI control (default 6, up to 30).
       if (!token.cancelled && state.gentleMode && Date.now() - state._gentleAt > 2000) {
         state._gentleAt = Date.now();
-        await computeGentleForecast(20, function () { return token.cancelled; });
+        await computeGentleForecast(getLookupSteps(), function () { return token.cancelled; });
       }
 
       if (!token.cancelled && events.length) {
@@ -1533,16 +1585,23 @@
   function applyMaskMethod(method, rebuild) {
     state.maskMethod = method;
     var ballsOn = method === "balls";
-    // "chgN" variants pre-blink changes across the next N iterations → need an
-    // N-step forecast horizon.
+    // Legacy chg1–chg6 presets sync the lookup control; "chg" uses the control as-is.
     var chg = /^chg([1-6])$/.exec(method);
-    state.forecastSteps = chg ? parseInt(chg[1], 10) : 1;
-    // "chgmin": preview only the least-differing cells from a 20-iteration outlook.
+    if (chg) {
+      state.lookupSteps = parseInt(chg[1], 10);
+      var fs = document.getElementById("forecast-steps");
+      if (fs) fs.value = String(state.lookupSteps);
+    }
+    state.forecastSteps = (method === "chg" || chg || method === "chgmin")
+      ? getLookupSteps()
+      : 1;
+    // "chgmin": preview only the least-differing cells from an N-iteration outlook.
     state.gentleMode = method === "chgmin";
     if (state.gentleMode) state._gentleAt = 0; // force recompute on switch
     if (state.maskBalls) state.maskBalls.setEnabled(ballsOn);
     if (state.maskFx) state.maskFx.setMethod(method);
     setMeta("d-mask", method);
+    setMeta("d-lookup", String(getLookupSteps()));
     if (rebuild) {
       cancelPrefetch();
       startPrefetch(currentSlot());
@@ -1565,6 +1624,8 @@
   function bindControls() {
     var rateInput = document.getElementById("changes-per-sec");
     var methodSelect = document.getElementById("mask-method");
+    var lookupInput = document.getElementById("forecast-steps");
+    var noiseInput = document.getElementById("noise-amount");
 
     adjustLayout();
     window.addEventListener("resize", adjustLayout);
@@ -1587,9 +1648,11 @@
         // Union of module [row,col] cells that will flip over the next `n`
         // iterations (from the multi-step forecast). Snow variants pre-blink
         // these so the real change blends into the flicker.
-        getChangingCells: function (n) { return unionFutureDiffs(n || 1); },
+        getChangingCells: function (n) { return unionFutureDiffs(n || getLookupSteps()); },
         // Cells (ranked least-differing-first) for the "gentlest transition" variant.
         getGentleCells: function () { return state.gentleCells || []; },
+        getHorizon: function () { return getLookupSteps(); },
+        getNoiseAmount: function () { return getNoiseAmount(); },
         onLog: function (msg, detail) { log(msg, detail); }
       });
     }
@@ -1610,6 +1673,44 @@
       });
     }
 
+    if (lookupInput) {
+      state.lookupSteps = parseInt(lookupInput.value, 10) || 6;
+      lookupInput.value = String(getLookupSteps());
+      setMeta("d-lookup", String(getLookupSteps()));
+      lookupInput.addEventListener("change", function () {
+        state.lookupSteps = parseInt(lookupInput.value, 10) || 6;
+        lookupInput.value = String(getLookupSteps());
+        state.forecastSteps = getLookupSteps();
+        setMeta("d-lookup", String(getLookupSteps()));
+        if (state.gentleMode) state._gentleAt = 0;
+        cancelPrefetch();
+        startPrefetch(currentSlot());
+        log("Lookup steps set", getLookupSteps());
+        adjustLayout();
+      });
+    }
+
+    if (noiseInput) {
+      var pct = parseInt(noiseInput.value, 10);
+      if (!isFinite(pct)) pct = 50;
+      if (pct < 0) pct = 0;
+      if (pct > 100) pct = 100;
+      state.noiseAmount = pct / 100;
+      noiseInput.value = String(pct);
+      setMeta("d-noise", pct + "%");
+      noiseInput.addEventListener("change", function () {
+        var p = parseInt(noiseInput.value, 10);
+        if (!isFinite(p)) p = 50;
+        if (p < 0) p = 0;
+        if (p > 100) p = 100;
+        state.noiseAmount = p / 100;
+        noiseInput.value = String(p);
+        setMeta("d-noise", p + "%");
+        log("Noise amount set", p + "%");
+        adjustLayout();
+      });
+    }
+
     if (methodSelect) {
       state.maskMethod = methodSelect.value || "crossfade";
       applyMaskMethod(state.maskMethod, false);
@@ -1617,6 +1718,7 @@
         var m = methodSelect.value || "crossfade";
         log("Mask method", m);
         applyMaskMethod(m, true);
+        adjustLayout();
       });
     } else {
       applyMaskMethod(state.maskMethod, false);
@@ -1702,6 +1804,9 @@
       version: VERSION,
       ecc: ECC,
       changesPerSec: getRate(),
+      lookupSteps: getLookupSteps(),
+      noiseAmount: Math.round(getNoiseAmount() * 100),
+      fps: (document.getElementById("d-fps") || {}).textContent || null,
       maskMethod: state.maskMethod,
       maskBalls: !!(state.maskBalls && state.maskBalls.enabled),
       padLen: state.padLen,

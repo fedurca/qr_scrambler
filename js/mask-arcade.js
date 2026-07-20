@@ -21,7 +21,7 @@
     snake: 110, tetris: 130, life: 160, snow: 120,
     snow1: 100, snow2: 100, snow3: 110, snow4: 100, snow5: 90,
     snow6: 100, snow7: 90, snow8: 80,
-    chg1: 110, chg2: 110, chg3: 110, chg4: 110, chg5: 110, chg6: 110, chgmin: 120
+    chg: 110, chg1: 110, chg2: 110, chg3: 110, chg4: 110, chg5: 110, chg6: 110, chgmin: 120
   };
   var INK = "#000000";
 
@@ -30,6 +30,8 @@
     this.getQrInfo = opts.getQrInfo || function () { return null; };
     this.getChangingCells = opts.getChangingCells || function () { return []; };
     this.getGentleCells = opts.getGentleCells || function () { return []; };
+    this.getHorizon = opts.getHorizon || function () { return 1; };
+    this.getNoiseAmount = opts.getNoiseAmount || function () { return 0.5; };
     this.mode = null;
     this.canvas = null;
     this.ctx = null;
@@ -42,14 +44,15 @@
     this.maxInk = 20;    // max simultaneously overlaid modules (ECC-budget safe)
     this.isReserved = null; // (row,col) -> bool: never ink function patterns
     this.state = null;
+    this._recentInk = {}; // temporal memory to break repeating blink patterns
     this._loop = this.loop.bind(this);
   }
 
   MaskArcade.MODES = ["snake", "tetris", "life", "snow",
     "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
-    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin"];
+    "chg", "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin"];
   MaskArcade.FLICKER = ["snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
-    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin"];
+    "chg", "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin"];
 
   // Safe overlaid-module fraction by ECC level: the reader must still correct the
   // overlaid cells as errors, so keep well under floor(EC/2). Roughly half the
@@ -328,19 +331,38 @@
   // Blink the modules that will flip next iteration (from the forecast) so the
   // real change blends into ongoing flicker; each variant adds different decoys.
   // Never exceeds perFrameCap inked cells → always decodable.
+  MaskArcade.prototype.noiseFrac = function () {
+    var a = this.getNoiseAmount ? this.getNoiseAmount() : 0.5;
+    if (!isFinite(a)) a = 0.5;
+    if (a < 0) a = 0;
+    if (a > 1) a = 1;
+    return a;
+  };
+
+  MaskArcade.prototype.horizonNow = function (fallback) {
+    var h = this.getHorizon ? (this.getHorizon() | 0) : 0;
+    if (h < 1) h = fallback | 0;
+    if (h < 1) h = 1;
+    if (h > 30) h = 30;
+    return h;
+  };
+
   MaskArcade.prototype.newFlicker = function (mode) {
-    // "chgN" = preview the union of the next N iterations' changes (falling-snow
-    // decoy style). "snowN" = single-iteration variant N.
+    // "chg" / "chgN" = preview the union of the next N iterations' changes
+    // (falling-snow decoy style). "snowN" = single-iteration variant N.
+    // N comes from the UI lookup control via getHorizon().
     var gentle = mode === "chgmin";
     var isChg = !gentle && mode.indexOf("chg") === 0;
     var v = (gentle || isChg) ? 3 : (parseInt(mode.slice(4), 10) || 1);
-    var horizon = isChg ? (parseInt(mode.slice(3), 10) || 1) : 1;
+    var horizon = isChg
+      ? (mode === "chg" ? this.horizonNow(6) : (parseInt(mode.slice(3), 10) || this.horizonNow(1)))
+      : 1;
     var flakes = [];
     if (v === 3 && !gentle) {
-      var n = Math.max(4, (this.size * 0.35) | 0);
+      var n = Math.max(3, Math.min(this.perFrameCap || 10, (this.size * 0.28 * (0.35 + this.noiseFrac())) | 0));
       for (var i = 0; i < n; i++) flakes.push({ x: (Math.random() * this.size) | 0, y: Math.random() * this.size, v: 0.5 + Math.random() });
     }
-    return { variant: gentle ? 1 : v, horizon: horizon, gentle: gentle, scanRow: 0, phase: 0, flakes: flakes };
+    return { variant: gentle ? 1 : v, horizon: horizon, multi: isChg, gentle: gentle, scanRow: 0, phase: 0, flakes: flakes };
   };
 
   MaskArcade.prototype.stepFlicker = function () {
@@ -348,12 +370,42 @@
     st.phase = (st.phase + 1) % 100000;
     if (st.variant === 5) st.scanRow = (st.scanRow + 1) % this.size;
     if (st.variant === 3) {
+      // Respawn flakes with blue-noise-ish x so columns don't form vertical streaks.
+      var usedX = {};
       for (var i = 0; i < st.flakes.length; i++) {
         var f = st.flakes[i];
         f.y += f.v;
-        if (f.y >= this.size) { f.y = -Math.random() * 2; f.x = (Math.random() * this.size) | 0; f.v = 0.5 + Math.random(); }
+        if (f.y >= this.size) {
+          f.y = -Math.random() * 2;
+          f.x = this.pickSpreadX(usedX);
+          f.v = 0.5 + Math.random();
+        }
+        usedX[f.x] = (usedX[f.x] || 0) + 1;
       }
+      // Keep flake count aligned with current noise amount (readable cap).
+      var want = Math.max(0, Math.min(this.perFrameCap || 10, Math.round((this.size * 0.28) * (0.25 + 0.75 * this.noiseFrac()))));
+      while (st.flakes.length < want) {
+        st.flakes.push({ x: this.pickSpreadX(usedX), y: -Math.random() * this.size, v: 0.5 + Math.random() });
+        usedX[st.flakes[st.flakes.length - 1].x] = (usedX[st.flakes[st.flakes.length - 1].x] || 0) + 1;
+      }
+      while (st.flakes.length > want) st.flakes.pop();
     }
+  };
+
+  /** Prefer an X that is not already crowded (breaks vertical snow columns). */
+  MaskArcade.prototype.pickSpreadX = function (usedX) {
+    var best = (Math.random() * this.size) | 0;
+    var bestScore = -1e9;
+    for (var t = 0; t < 8; t++) {
+      var x = (Math.random() * this.size) | 0;
+      var score = -((usedX && usedX[x]) || 0) * 4;
+      // Penalize neighbours a bit so flakes don't form a thick vertical band.
+      score -= ((usedX && usedX[x - 1]) || 0) * 1.5;
+      score -= ((usedX && usedX[x + 1]) || 0) * 1.5;
+      score += Math.random() * 0.3;
+      if (score > bestScore) { bestScore = score; best = x; }
+    }
+    return best;
   };
 
   MaskArcade.prototype.randCell = function () {
@@ -373,41 +425,178 @@
     return this.randCell();
   };
 
+  /**
+   * Blue-noise / anti-pattern decoy picker.
+   * Maximally avoids eye-detectable structure: clusters, straight lines, regular
+   * grids, and repeating temporal blinks — while staying on non-reserved modules.
+   */
+  MaskArcade.prototype.pickAntiPatternDecoys = function (want, changingSet, preferStable) {
+    var out = [];
+    if (want <= 0 || !this.size) return out;
+    var size = this.size;
+    var occupied = {};
+    var rowCnt = new Int16Array(size);
+    var colCnt = new Int16Array(size);
+    var recent = this._recentInk || {};
+    var candidates = [];
+    var tries = Math.min(size * size, Math.max(80, want * 48));
+    var t, r, c, k;
+    for (t = 0; t < tries; t++) {
+      r = (Math.random() * size) | 0;
+      c = (Math.random() * size) | 0;
+      if (this.isReserved && this.isReserved(r, c)) continue;
+      k = r + "," + c;
+      if (occupied[k]) continue;
+      if (preferStable && changingSet && changingSet[k]) continue;
+      occupied[k] = 1;
+      candidates.push([r, c]);
+    }
+    // Greedy: maximize min-distance, penalize shared rows/cols, adjacency, recent ink.
+    while (out.length < want && candidates.length) {
+      var bestI = 0;
+      var bestScore = -1e12;
+      for (var i = 0; i < candidates.length; i++) {
+        r = candidates[i][0];
+        c = candidates[i][1];
+        var minD2 = 1e9;
+        for (var j = 0; j < out.length; j++) {
+          var dr = r - out[j][0];
+          var dc = c - out[j][1];
+          var d2 = dr * dr + dc * dc;
+          if (d2 < minD2) minD2 = d2;
+        }
+        if (out.length === 0) minD2 = size * size;
+        var adj = 0;
+        for (j = 0; j < out.length; j++) {
+          if (Math.abs(r - out[j][0]) <= 1 && Math.abs(c - out[j][1]) <= 1) adj++;
+        }
+        var score = minD2
+          - rowCnt[r] * 9
+          - colCnt[c] * 9
+          - adj * 14
+          - ((recent[r + "," + c] || 0) * 6)
+          + Math.random() * 0.4;
+        // Soft penalty for 2-step lattice (checker / every-other) regularity.
+        if (out.length) {
+          var lattice = 0;
+          for (j = 0; j < out.length; j++) {
+            if (((r + c) & 1) === ((out[j][0] + out[j][1]) & 1) &&
+                (Math.abs(r - out[j][0]) + Math.abs(c - out[j][1])) === 2) lattice++;
+          }
+          score -= lattice * 3;
+        }
+        if (score > bestScore) { bestScore = score; bestI = i; }
+      }
+      var pick = candidates.splice(bestI, 1)[0];
+      out.push(pick);
+      rowCnt[pick[0]]++;
+      colCnt[pick[1]]++;
+    }
+    return out;
+  };
+
+  MaskArcade.prototype.rememberInk = function (cells) {
+    var next = {};
+    var k;
+    // Decay previous memory so temporal correlation fades over a few frames.
+    for (k in this._recentInk) {
+      if (!Object.prototype.hasOwnProperty.call(this._recentInk, k)) continue;
+      var v = (this._recentInk[k] | 0) - 1;
+      if (v > 0) next[k] = v;
+    }
+    for (var i = 0; i < cells.length; i++) {
+      next[cells[i][0] + "," + cells[i][1]] = 3;
+    }
+    this._recentInk = next;
+  };
+
   /** Decoy cells (module [row,col]) for the current variant. */
-  MaskArcade.prototype.decoysFor = function (st, changing, changingSet) {
+  MaskArcade.prototype.decoysFor = function (st, changing, changingSet, budget) {
     var out = [];
     var i, n, r, c;
-    var cap = this.perFrameCap;
-    if (st.variant === 1) {
-      return out; // changes only
-    } else if (st.variant === 2) {
-      n = Math.ceil(cap * 0.6);
-      for (i = 0; i < n; i++) out.push(this.randCell()); // scattered noise
+    var noise = this.noiseFrac();
+    var cap = Math.max(0, budget | 0);
+    if (cap <= 0 || st.variant === 1) return out;
+    if (st.variant === 2) {
+      // Scattered anti-pattern noise (default "Změny + šum").
+      return this.pickAntiPatternDecoys(Math.max(1, Math.round(cap * (0.35 + 0.65 * noise))), changingSet, false);
     } else if (st.variant === 3) {
-      for (i = 0; i < st.flakes.length; i++) out.push([Math.floor(st.flakes[i].y), st.flakes[i].x]); // falling snow
+      n = Math.max(0, Math.min(st.flakes.length, Math.round(cap * (0.4 + 0.6 * noise))));
+      // Subsample flakes with spread preference (already anti-column via pickSpreadX).
+      for (i = 0; i < n; i++) out.push([Math.floor(st.flakes[i].y), st.flakes[i].x]);
     } else if (st.variant === 4) {
-      for (i = 0; i < changing.length; i++) { // halo around changes
+      // Halo — then anti-pattern fill so it doesn't read as a tight blob.
+      for (i = 0; i < changing.length && out.length < cap; i++) {
         var dr = (Math.random() * 3 | 0) - 1, dc = (Math.random() * 3 | 0) - 1;
+        if (dr === 0 && dc === 0) continue;
         out.push([changing[i][0] + dr, changing[i][1] + dc]);
       }
-      if (!changing.length) { for (i = 0; i < cap; i++) out.push(this.randCell()); }
+      if (out.length < cap) {
+        out = out.concat(this.pickAntiPatternDecoys(cap - out.length, changingSet, false));
+      }
     } else if (st.variant === 5) {
-      for (c = 0; c < this.size; c++) out.push([st.scanRow, c]); // scanline
+      // Sparse scan: only a few cells on the row (full line is too eye-catching).
+      n = Math.max(1, Math.round(cap * (0.3 + 0.7 * noise)));
+      var cols = this.pickAntiPatternDecoys(n * 2, changingSet, false);
+      for (i = 0; i < cols.length && out.length < n; i++) out.push([st.scanRow, cols[i][1]]);
     } else if (st.variant === 6) {
-      // camouflage: cells that will stay the SAME next iteration also blink, so
-      // a real change is indistinguishable from a decoy blink.
-      n = Math.max(cap, 12);
-      for (i = 0; i < n; i++) out.push(this.randStable(changingSet));
+      return this.pickAntiPatternDecoys(Math.max(1, Math.round(cap * (0.5 + 0.5 * noise))), changingSet, true);
     } else if (st.variant === 7) {
-      // interlace/scan glitch: cells on a moving set of rows (every 3rd row).
+      // Soft interlace: density from noise, positions anti-pattern within active rows.
+      n = Math.max(1, Math.round(cap * (0.35 + 0.65 * noise)));
+      var pool = [];
       for (r = 0; r < this.size; r++) {
         if ((r + st.phase) % 3 !== 0) continue;
-        for (c = 0; c < this.size; c++) if (Math.random() < 0.5) out.push([r, c]);
+        for (c = 0; c < this.size; c++) {
+          if (this.isReserved && this.isReserved(r, c)) continue;
+          pool.push([r, c]);
+        }
+      }
+      // Score pool like anti-pattern using a temporary recent set.
+      out = this.pickAntiPatternDecoys(n, changingSet, false);
+      // Prefer pool cells: filter result to interlaced rows when possible.
+      var filtered = [];
+      for (i = 0; i < out.length; i++) {
+        if ((out[i][0] + st.phase) % 3 === 0) filtered.push(out[i]);
+      }
+      if (filtered.length >= Math.ceil(n * 0.5)) out = filtered;
+      else if (pool.length) {
+        out = [];
+        for (i = pool.length - 1; i > 0; i--) {
+          var q = (Math.random() * (i + 1)) | 0;
+          var u = pool[i]; pool[i] = pool[q]; pool[q] = u;
+        }
+        // Re-pick from pool with distance scoring.
+        var tmp = this._recentInk;
+        // Use pick on a constrained candidate set by temporarily sampling pool.
+        var picked = [];
+        var rowCnt = {};
+        var colCnt = {};
+        while (picked.length < n && pool.length) {
+          var bi = 0, bs = -1e12;
+          for (i = 0; i < pool.length; i++) {
+            r = pool[i][0]; c = pool[i][1];
+            var md = 1e9;
+            for (var j = 0; j < picked.length; j++) {
+              var drr = r - picked[j][0], dcc = c - picked[j][1];
+              var dd = drr * drr + dcc * dcc;
+              if (dd < md) md = dd;
+            }
+            if (!picked.length) md = 100;
+            var sc = md - (rowCnt[r] || 0) * 8 - (colCnt[c] || 0) * 8 - ((tmp[r + "," + c] || 0) * 5);
+            if (sc > bs) { bs = sc; bi = i; }
+          }
+          var p = pool.splice(bi, 1)[0];
+          picked.push(p);
+          rowCnt[p[0]] = (rowCnt[p[0]] || 0) + 1;
+          colCnt[p[1]] = (colCnt[p[1]] || 0) + 1;
+        }
+        out = picked;
       }
     } else if (st.variant === 8) {
-      // static: dense TV-static dissolve across the whole data area.
-      n = cap * 3;
-      for (i = 0; i < n; i++) out.push(this.randStable(changingSet));
+      return this.pickAntiPatternDecoys(Math.max(1, Math.round(cap * (0.55 + 0.45 * noise))), changingSet, true);
+    } else {
+      return this.pickAntiPatternDecoys(Math.round(cap * noise), changingSet, false);
     }
     return out;
   };
@@ -416,29 +605,38 @@
     this.beginInk();
     var st = this.state;
     var cap = this.perFrameCap;
+    var noise = this.noiseFrac();
+    // Effective ink budget: always ≤ perFrameCap so every frame stays decodable.
+    // Noise 0 → mostly change cells; Noise 100 → use the full readable cap.
+    var inkBudget = st.variant === 1
+      ? Math.max(2, Math.min(cap, Math.round(cap * (0.55 + 0.45 * Math.max(noise, 0.35)))))
+      : Math.max(2, Math.min(cap, Math.round(cap * (0.30 + 0.70 * Math.max(noise, 0.15)))));
+    var horizon = st.multi ? this.horizonNow(st.horizon || 1) : (st.horizon || 1);
     var changing = st.gentle
       ? (this.getGentleCells() || [])
-      : (this.getChangingCells(st.horizon || 1) || []);
+      : (this.getChangingCells(horizon) || []);
     var changingSet = {};
     for (var ci = 0; ci < changing.length; ci++) changingSet[changing[ci][0] + "," + changing[ci][1]] = 1;
     var seen = {};
     var sel = [];
     function add(r, c) {
-      if (r < 0 || c < 0) return;
+      if (r < 0 || c < 0 || r >= this.size || c >= this.size) return;
+      if (this.isReserved && this.isReserved(r, c)) return;
       var k = r + "," + c;
       if (seen[k]) return;
       seen[k] = 1;
       sel.push([r, c]);
     }
+    var addBound = add.bind(this);
     // Priority 1: a random blinking subset of the cells that will change.
     // v6 (camouflage) shows ~half changes / half stable so they look identical;
     // v8 (static) lets the dense decoys dominate. Others favour the changes.
     var chgCap;
-    if (st.gentle) chgCap = Math.max(3, Math.floor(cap * 0.5));
-    else if (st.variant === 1) chgCap = cap;
-    else if (st.variant === 6) chgCap = Math.floor(cap * 0.5);
-    else if (st.variant === 8) chgCap = Math.floor(cap * 0.4);
-    else chgCap = Math.ceil(cap * 0.65);
+    if (st.gentle) chgCap = Math.max(2, Math.floor(inkBudget * 0.5));
+    else if (st.variant === 1) chgCap = inkBudget;
+    else if (st.variant === 6) chgCap = Math.floor(inkBudget * 0.45);
+    else if (st.variant === 8) chgCap = Math.floor(inkBudget * 0.35);
+    else chgCap = Math.ceil(inkBudget * (0.45 + 0.2 * (1 - noise)));
     // Gentle mode: draw from the FRONT of the list (least-differing cells), only
     // lightly rotated, so the previewed set stays the subtlest possible.
     var chg;
@@ -448,14 +646,23 @@
     var blinkP = st.gentle ? 0.55 : 0.72;
     var cc = 0;
     for (var i = 0; i < chg.length && cc < chgCap; i++) {
-      if (Math.random() < blinkP) { add(chg[i][0], chg[i][1]); cc++; }
+      if (Math.random() < blinkP) { addBound(chg[i][0], chg[i][1]); cc++; }
     }
-    // Priority 2: variant decoys fill the remaining budget.
-    var decoys = this.decoysFor(st, changing, changingSet);
-    for (var d = decoys.length - 1; d > 0; d--) { var q = (Math.random() * (d + 1)) | 0; var u = decoys[d]; decoys[d] = decoys[q]; decoys[q] = u; }
-    for (i = 0; i < decoys.length && sel.length < cap; i++) add(decoys[i][0], decoys[i][1]);
-    // Fallback so it never looks dead before the first forecast arrives.
-    while (sel.length < Math.min(6, cap) && (changing.length === 0)) { var rc = this.randCell(); add(rc[0], rc[1]); }
+    // Priority 2: anti-pattern decoys fill the remaining budget (scaled by noise %).
+    var decoyBudget = Math.max(0, inkBudget - sel.length);
+    if (st.variant !== 1 && noise > 0) {
+      var decoys = this.decoysFor(st, changing, changingSet, decoyBudget);
+      for (var d = decoys.length - 1; d > 0; d--) { var q = (Math.random() * (d + 1)) | 0; var u = decoys[d]; decoys[d] = decoys[q]; decoys[q] = u; }
+      for (i = 0; i < decoys.length && sel.length < inkBudget; i++) addBound(decoys[i][0], decoys[i][1]);
+    }
+    // Fallback: anti-pattern fill so it never looks dead before forecast arrives.
+    if (sel.length < Math.min(4, inkBudget) && changing.length === 0 && noise > 0) {
+      var fill = this.pickAntiPatternDecoys(Math.min(4, inkBudget) - sel.length, changingSet, false);
+      for (i = 0; i < fill.length; i++) addBound(fill[i][0], fill[i][1]);
+    }
+    // Hard safety: never exceed perFrameCap (readable every frame).
+    if (sel.length > cap) sel.length = cap;
+    this.rememberInk(sel);
     for (i = 0; i < sel.length; i++) this.fillModule(sel[i][1], sel[i][0]);
   };
 
