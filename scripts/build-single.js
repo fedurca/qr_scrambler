@@ -23,6 +23,7 @@ var versionJs = "window.APP_VERSION=" + JSON.stringify(version) + ";\n";
 var codec = read("js/codec.js");
 var qrStructure = read("js/qr-structure.js");
 var maskBalls = read("js/mask-balls.js");
+var maskMethods = read("js/mask-methods.js");
 var app = read("js/app.js");
 
 var html = `<!DOCTYPE html>
@@ -43,8 +44,14 @@ ${css}
       <input id="epoch-interval" type="number" min="1" max="120" step="1" value="5" />
     </label>
     <label>
-      <input id="mask-balls-toggle" type="checkbox" checked />
-      Maskovací koule
+      Maskování
+      <select id="mask-method">
+        <option value="crossfade" selected>Crossfade</option>
+        <option value="balls">Koule</option>
+        <option value="shimmer">Shimmer</option>
+        <option value="softpatch">Měkká záplata</option>
+        <option value="none">Žádné</option>
+      </select>
     </label>
   </section>
 
@@ -69,7 +76,7 @@ ${css}
         <dt>ecc / ver</dt><dd id="d-opts">Q / 4</dd>
         <dt>render</dt><dd id="d-render">—</dd>
         <dt>interval</dt><dd id="d-interval">5 s</dd>
-        <dt>balls</dt><dd id="d-balls">on</dd>
+        <dt>mask</dt><dd id="d-mask">crossfade</dd>
         <dt>forecast</dt><dd id="d-forecast">—</dd>
         <dt>ball pos</dt><dd id="d-ballpos">—</dd>
         <dt>last flip</dt><dd id="d-flip">—</dd>
@@ -113,6 +120,9 @@ ${qrStructure}
   </script>
   <script>
 ${maskBalls}
+  </script>
+  <script>
+${maskMethods}
   </script>
   <script>
 ${app}

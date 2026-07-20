@@ -89,6 +89,8 @@
     paintEl: null,
     epochIntervalSec: 5,
     maskBalls: null,
+    maskFx: null,
+    maskMethod: "crossfade",
     pendingDiffs: null,
     forecastHorizon: 8,
     lastPlanSnap: null
@@ -926,7 +928,7 @@
       if (d) n++;
       flips.push(d);
     }
-    setMeta("d-balls", "on (H" + events.length + "/" + n + ")");
+    setMeta("d-mask", "balls (H" + events.length + "/" + n + ")");
     log("QR forecast diffs", {
       horizon: events.length,
       flips: flips,
@@ -1190,7 +1192,19 @@
     state.prevModules = copyModules(result.modules);
     state.lastUrl = canonical.url;
 
-    drawModules(result.modules);
+    // Route the visual swap through the active masking method. crossfade/softpatch
+    // animate the changed cells (crossfade defers the swap behind the overlay);
+    // balls/shimmer/none commit immediately.
+    var newModules = result.modules;
+    var commit = function () { drawModules(newModules); };
+    if (state.maskFx && !state.maskFx.usesBalls() && flipDiffs.length) {
+      var cells = flipDiffs.map(function (rc) {
+        return [rc[0], rc[1], moduleGet(newModules, rc[0], rc[1]) ? 1 : 0];
+      });
+      state.maskFx.present(cells, moduleSize(newModules), MARGIN, commit);
+    } else {
+      commit();
+    }
     urlEl.textContent = canonical.url;
     setMeta("d-url", canonical.url);
     setMeta("d-epoch", String(decodedEpoch));
@@ -1238,7 +1252,7 @@
       );
       log("FLIP COVER", flipReport);
     } else {
-      setMeta("d-flip", "balls off");
+      setMeta("d-flip", state.maskMethod + " (" + flipDiffs.length + " cells)");
     }
 
     if (state.renders <= 5 || state.renders % 30 === 0) {
@@ -1289,10 +1303,15 @@
         }
 
         // Immediate canonical paint so mobile never stays blank during search.
-        var quick = chooseCanonical(state.api, epoch, state.prevModules, state.pad);
-        drawModules(quick.modules);
-        urlEl.textContent = quick.url;
-        setMeta("d-url", quick.url);
+        // For deferred-swap methods (crossfade) keep the previous frame on screen
+        // so the change fades in from it instead of popping to the canonical.
+        var deferSwap = state.prevModules && state.maskFx && state.maskFx.wantsDeferredSwap();
+        if (!deferSwap) {
+          var quick = chooseCanonical(state.api, epoch, state.prevModules, state.pad);
+          drawModules(quick.modules);
+          urlEl.textContent = quick.url;
+          setMeta("d-url", quick.url);
+        }
         setMeta("d-epoch", String(epoch));
         setMeta("d-render", state.renderMode);
         setStatus("warn", "refine");
@@ -1326,15 +1345,33 @@
       });
   }
 
+  function applyMaskMethod(method, rebuild) {
+    state.maskMethod = method;
+    var ballsOn = method === "balls";
+    if (state.maskBalls) state.maskBalls.setEnabled(ballsOn);
+    if (state.maskFx) state.maskFx.setMethod(method);
+    setMeta("d-mask", method);
+    if (ballsOn && rebuild) {
+      cancelPrefetch();
+      startPrefetch(currentSlot());
+    }
+  }
+
   function bindControls() {
     var intervalInput = document.getElementById("epoch-interval");
-    var ballsToggle = document.getElementById("mask-balls-toggle");
+    var methodSelect = document.getElementById("mask-method");
 
     if (typeof MaskBalls === "function") {
       state.maskBalls = new MaskBalls({
         getQrRect: getQrContentRect,
         onLog: function (msg, detail) { log(msg, detail); },
         onPlanDebug: onMaskPlanDebug
+      });
+    }
+    if (typeof MaskFx === "function") {
+      state.maskFx = new MaskFx({
+        getQrRect: getQrContentRect,
+        onLog: function (msg, detail) { log(msg, detail); }
       });
     }
 
@@ -1354,21 +1391,16 @@
       });
     }
 
-    if (ballsToggle) {
-      var ballsOn = !!ballsToggle.checked;
-      if (state.maskBalls) state.maskBalls.setEnabled(ballsOn);
-      setMeta("d-balls", ballsOn ? "on" : "off");
-      ballsToggle.addEventListener("change", function () {
-        var on = !!ballsToggle.checked;
-        if (state.maskBalls) state.maskBalls.setEnabled(on);
-        setMeta("d-balls", on ? "on" : "off");
-        log("Mask balls", on ? "enabled" : "disabled");
-        if (on) {
-          // Rebuild multi-step forecast immediately when enabling
-          cancelPrefetch();
-          startPrefetch(currentSlot());
-        }
+    if (methodSelect) {
+      state.maskMethod = methodSelect.value || "crossfade";
+      applyMaskMethod(state.maskMethod, false);
+      methodSelect.addEventListener("change", function () {
+        var m = methodSelect.value || "crossfade";
+        log("Mask method", m);
+        applyMaskMethod(m, true);
       });
+    } else {
+      applyMaskMethod(state.maskMethod, false);
     }
   }
 
@@ -1452,6 +1484,7 @@
       version: VERSION,
       ecc: ECC,
       epochIntervalSec: getEpochIntervalSec(),
+      maskMethod: state.maskMethod,
       maskBalls: !!(state.maskBalls && state.maskBalls.enabled),
       padLen: state.padLen,
       mask: state.mask,
