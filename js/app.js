@@ -77,7 +77,8 @@
     paintEl: null,
     epochIntervalSec: 1,
     maskBalls: null,
-    pendingDiffs: null
+    pendingDiffs: null,
+    forecastHorizon: 4
   };
 
   function getEpochIntervalSec() {
@@ -655,53 +656,100 @@
     if (state.prefetch) state.prefetch.cancelled = true;
   }
 
+  function pushForecastToBalls(events) {
+    if (!state.maskBalls || !state.maskBalls.enabled) return;
+    state.maskBalls.setForecast(events, { intervalMs: getEpochIntervalSec() * 1000 });
+    var n = 0;
+    for (var i = 0; i < events.length; i++) n += (events[i].diffs && events[i].diffs.length) ? 1 : 0;
+    setMeta("d-balls", "on (H" + events.length + "/" + n + ")");
+  }
+
   function planMaskBallsFromFrame(frame, changeAtMs) {
     if (!state.maskBalls || !state.maskBalls.enabled || !frame || !state.prevModules) return;
     var nextMods = frame.result.modules;
     var diffs = listDiffs(state.prevModules, nextMods);
     state.pendingDiffs = diffs;
-    state.maskBalls.planForDiffs(diffs, {
+    pushForecastToBalls([{
+      slot: currentSlot() + 1,
+      changeAtMs: changeAtMs,
       moduleSize: moduleSize(nextMods),
       margin: MARGIN,
-      changeAtMs: changeAtMs,
-      intervalMs: getEpochIntervalSec() * 1000
-    });
-    setMeta("d-balls", "on (" + (state.maskBalls.missions ? state.maskBalls.missions.length : 0) + ")");
+      diffs: diffs
+    }]);
   }
 
   function startPrefetch(slotJustShown) {
     if (!state.api || !state.prevModules) return;
     cancelPrefetch();
     var interval = getEpochIntervalSec();
+    var horizon = state.maskBalls && state.maskBalls.enabled
+      ? Math.max(2, state.forecastHorizon | 0)
+      : 1;
     var nextSlot = slotJustShown + 1;
-    // Predict unix epoch near the start of the next slot.
     var nextEpoch = nextSlot * interval;
     var token = {
       cancelled: false,
       slot: nextSlot,
       epoch: nextEpoch,
-      ready: null
+      ready: null,
+      horizon: horizon
     };
     state.prefetch = token;
 
     var changeAt = slotChangeAtMs(nextSlot);
     var msLeft = Math.max(200, changeAt - Date.now() - 40);
-    var budget = Math.min(PREFETCH_BUDGET_MS, Math.max(STABILIZE_BUDGET_MS, msLeft * 0.85));
+    var budget1 = Math.min(PREFETCH_BUDGET_MS, Math.max(STABILIZE_BUDGET_MS, msLeft * 0.85));
 
-    token.ready = buildFrame(
-      state.api,
-      nextEpoch,
-      state.prevModules,
-      state.pad,
-      budget,
-      function () { return token.cancelled; }
-    ).then(function (frame) {
-      if (token.cancelled) return null;
-      token.frame = frame;
-      // Plan ball trajectories as soon as next matrix is known.
-      planMaskBallsFromFrame(frame, changeAt);
-      return frame;
-    }).catch(function (err) {
+    token.ready = (async function () {
+      var mods = state.prevModules;
+      var pad = state.pad;
+      var events = [];
+      var firstFrame = null;
+
+      for (var step = 1; step <= horizon; step++) {
+        if (token.cancelled) return null;
+        var slot = slotJustShown + step;
+        var epoch = slot * interval;
+        var budget = step === 1
+          ? budget1
+          : Math.min(IS_MOBILE ? 220 : 320, Math.max(100, budget1 * (0.55 - step * 0.06)));
+        var frame = await buildFrame(
+          state.api,
+          epoch,
+          mods,
+          pad,
+          budget,
+          function () { return token.cancelled; }
+        );
+        if (token.cancelled || !frame) break;
+        if (step === 1) {
+          firstFrame = frame;
+          token.frame = frame;
+        }
+        var diffs = listDiffs(mods, frame.result.modules);
+        events.push({
+          slot: slot,
+          changeAtMs: slotChangeAtMs(slot),
+          moduleSize: moduleSize(frame.result.modules),
+          margin: MARGIN,
+          diffs: diffs
+        });
+        mods = frame.result.modules;
+        pad = frame.canonical.pad;
+        // Yield so UI stays responsive across horizon steps
+        await yieldToBrowser();
+      }
+
+      if (!token.cancelled && events.length) {
+        if (events[0] && events[0].diffs) state.pendingDiffs = events[0].diffs;
+        pushForecastToBalls(events);
+        log("Prefetch horizon", {
+          steps: events.length,
+          flips: events.map(function (e) { return e.diffs ? e.diffs.length : 0; })
+        });
+      }
+      return firstFrame;
+    })().catch(function (err) {
       if (!token.cancelled) log("Prefetch error", String(err && err.message ? err.message : err));
       return null;
     });
@@ -997,12 +1045,10 @@
         if (state.maskBalls) state.maskBalls.setEnabled(on);
         setMeta("d-balls", on ? "on" : "off");
         log("Mask balls", on ? "enabled" : "disabled");
-        if (on && state.prefetch && state.prefetch.frame) {
-          planMaskBallsFromFrame(state.prefetch.frame, slotChangeAtMs(currentSlot() + 1));
-        } else if (on && state.prefetch && state.prefetch.ready) {
-          state.prefetch.ready.then(function (frame) {
-            if (frame) planMaskBallsFromFrame(frame, slotChangeAtMs(currentSlot() + 1));
-          });
+        if (on) {
+          // Rebuild multi-step forecast immediately when enabling
+          cancelPrefetch();
+          startPrefetch(currentSlot());
         }
       });
     }

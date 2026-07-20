@@ -1,13 +1,34 @@
 /**
- * Optional bouncing mask balls that cover upcoming QR module changes.
- * Default: disabled. Smooth rAF motion with edge bounces.
- * Timing uses wall-clock Date.now() (same as epoch slot boundaries).
+ * Mask balls: R/G/B/C/M/Y/K billiard motion.
+ * Constant speed, straight lines; direction changes ONLY on screen-edge bounce
+ * (specular by default, or aimed angle at bounce for upcoming covers).
+ * Forecast covers multiple future QR changes; balls only graze QR briefly.
  */
 (function (global) {
   "use strict";
 
+  var BALL_COLORS = [
+    { id: "R", hex: "#e53935" },
+    { id: "G", hex: "#43a047" },
+    { id: "B", hex: "#1e88e5" },
+    { id: "C", hex: "#00bcd4" },
+    { id: "M", hex: "#d81b60" },
+    { id: "Y", hex: "#fdd835" },
+    { id: "K", hex: "#111111" }
+  ];
+
+  var BASE_SPEED = 260;
+  var SPEED_JITTER = 40;
+  var MIN_COVER_MS = 36;
+  var MAX_COVER_MS = 70;
+  var AIM_LOOKAHEAD_BOUNCES = 3;
+
   function clamp(v, a, b) {
     return Math.max(a, Math.min(b, v));
+  }
+
+  function hypot(dx, dy) {
+    return Math.sqrt(dx * dx + dy * dy);
   }
 
   function MaskBalls(options) {
@@ -16,8 +37,9 @@
     this.balls = [];
     this.raf = 0;
     this.lastTs = 0;
-    this.missions = [];
+    this.events = [];
     this.qrRect = null;
+    this.intervalMs = 1000;
     this.getQrRect = options && options.getQrRect ? options.getQrRect : function () { return null; };
     this.onLog = options && options.onLog ? options.onLog : function () {};
   }
@@ -37,11 +59,11 @@
     if (this.enabled) {
       this.ensureLayer();
       this.layer.style.display = "block";
-      if (!this.balls.length) this.spawnIdleBalls(3);
+      if (!this.balls.length) this.spawnPalette();
       this.startLoop();
     } else {
       this.stopLoop();
-      this.missions = [];
+      this.events = [];
       this.clearBalls();
       if (this.layer) this.layer.style.display = "none";
     }
@@ -56,89 +78,137 @@
     this.balls = [];
   };
 
-  MaskBalls.prototype.spawnBall = function (x, y, r) {
+  MaskBalls.prototype.spawnPalette = function () {
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    for (var i = 0; i < BALL_COLORS.length; i++) {
+      var c = BALL_COLORS[i];
+      var speed = BASE_SPEED + (Math.random() * 2 - 1) * SPEED_JITTER;
+      var ang = (i / BALL_COLORS.length) * Math.PI * 2 + Math.random() * 0.5;
+      this.spawnBall(
+        40 + Math.random() * Math.max(1, w - 80),
+        40 + Math.random() * Math.max(1, h - 80),
+        30,
+        c,
+        Math.cos(ang) * speed,
+        Math.sin(ang) * speed
+      );
+    }
+  };
+
+  MaskBalls.prototype.spawnBall = function (x, y, r, color, vx, vy) {
     var layer = this.ensureLayer();
     var el = document.createElement("div");
-    el.className = "mask-ball";
-    var radius = r || 28;
-    el.style.width = radius * 2 + "px";
-    el.style.height = radius * 2 + "px";
+    el.className = "mask-ball color-" + color.id;
+    el.style.background = color.hex;
+    el.style.width = r * 2 + "px";
+    el.style.height = r * 2 + "px";
+    el.title = color.id;
     layer.appendChild(el);
-    var speed = 220 + Math.random() * 120;
-    var ang = Math.random() * Math.PI * 2;
+    var speed = hypot(vx, vy) || BASE_SPEED;
     var ball = {
       el: el,
+      colorId: color.id,
+      hex: color.hex,
       x: x,
       y: y,
-      vx: Math.cos(ang) * speed,
-      vy: Math.sin(ang) * speed,
-      r: radius,
-      mode: "idle",
-      mission: null
+      vx: vx,
+      vy: vy,
+      speed: speed,
+      r: r,
+      pendingAngle: null,
+      queue: []
     };
     this.balls.push(ball);
     this.place(ball);
     return ball;
   };
 
-  MaskBalls.prototype.spawnIdleBalls = function (n) {
-    var w = window.innerWidth;
-    var h = window.innerHeight;
-    for (var i = 0; i < n; i++) {
-      this.spawnBall(
-        40 + Math.random() * Math.max(1, w - 80),
-        40 + Math.random() * Math.max(1, h - 80),
-        26 + Math.random() * 10
-      );
-    }
-  };
-
   MaskBalls.prototype.place = function (ball) {
     ball.el.style.transform = "translate(" + (ball.x - ball.r) + "px," + (ball.y - ball.r) + "px)";
   };
 
-  MaskBalls.prototype.ensureBallCount = function (n) {
-    while (this.balls.length < n) {
-      this.spawnBall(
-        Math.random() * window.innerWidth,
-        Math.random() * window.innerHeight,
-        28
-      );
-    }
-    for (var i = 0; i < this.balls.length; i++) {
-      this.balls[i].el.style.opacity = i < n || this.balls[i].mode !== "idle" ? "1" : "0.45";
-    }
+  MaskBalls.prototype.playBounds = function (ball) {
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    return {
+      L: ball.r,
+      T: ball.r,
+      R: Math.max(ball.r + 1, w - ball.r),
+      B: Math.max(ball.r + 1, h - ball.r)
+    };
+  };
+
+  /** Image of point in unfolded billiard table for bounce path aiming. */
+  MaskBalls.prototype.unfoldPoint = function (px, py, nx, ny, bounds) {
+    var W = bounds.R - bounds.L;
+    var H = bounds.B - bounds.T;
+    var x = px - bounds.L;
+    var y = py - bounds.T;
+    var ax = Math.abs(nx);
+    var ay = Math.abs(ny);
+    var ux = (ax % 2 === 0) ? x : (W - x);
+    var uy = (ay % 2 === 0) ? y : (H - y);
+    return {
+      x: bounds.L + ux + nx * W,
+      y: bounds.T + uy + ny * H
+    };
   };
 
   /**
-   * Cluster changed module cells into cover targets in viewport coords.
-   * moduleDiffs: [[row,col], ...]
-   * meta: { moduleSize, margin, changeAtMs, intervalMs }
-   * changeAtMs must be wall-clock Date.now() epoch ms.
+   * Choose outbound angle at bounce point so a specular billiard path
+   * reaches target near travelDist. Returns angle or null.
    */
-  MaskBalls.prototype.planForDiffs = function (moduleDiffs, meta) {
-    if (!this.enabled) return;
-    var qr = this.getQrRect();
-    if (!qr || !moduleDiffs || !moduleDiffs.length) {
-      this.missions = [];
-      return;
+  MaskBalls.prototype.aimAngleFromBounce = function (bx, by, target, travelDist, ball) {
+    var bounds = this.playBounds(ball);
+    var best = null;
+    var bestErr = Infinity;
+    var bestRaw = Infinity;
+    for (var nx = -AIM_LOOKAHEAD_BOUNCES; nx <= AIM_LOOKAHEAD_BOUNCES; nx++) {
+      for (var ny = -AIM_LOOKAHEAD_BOUNCES; ny <= AIM_LOOKAHEAD_BOUNCES; ny++) {
+        var imgX;
+        var imgY;
+        if (nx === 0 && ny === 0) {
+          imgX = target.x;
+          imgY = target.y;
+        } else {
+          var img = this.unfoldPoint(target.x, target.y, nx, ny, bounds);
+          imgX = img.x;
+          imgY = img.y;
+        }
+        var d = hypot(imgX - bx, imgY - by);
+        if (d <= 1) continue;
+        var raw = Math.abs(d - travelDist);
+        var err = raw + (Math.abs(nx) + Math.abs(ny)) * 4;
+        if (err < bestErr) {
+          bestErr = err;
+          bestRaw = raw;
+          best = Math.atan2(imgY - by, imgX - bx);
+        }
+      }
     }
+    if (best == null) return null;
+    // Accept generous timing slack — graze still helps; horizon planning needs hits
+    var slack = Math.max(ball.r * 2.8, travelDist * 0.28, 70);
+    if (bestRaw > slack) return null;
+    return best;
+  };
 
+  MaskBalls.prototype.clusterDiffs = function (moduleDiffs, meta, qr) {
     var size = meta.moduleSize;
     var margin = meta.margin || 2;
     var n = size + margin * 2;
     var cellW = qr.width / n;
     var cellH = qr.height / n;
-
     var cell = Math.max(3, Math.round(size / 10));
     var buckets = {};
     for (var i = 0; i < moduleDiffs.length; i++) {
       var row = moduleDiffs[i][0];
       var col = moduleDiffs[i][1];
-      var br = (row / cell) | 0;
-      var bc = (col / cell) | 0;
-      var key = br + ":" + bc;
-      if (!buckets[key]) buckets[key] = { sumR: 0, sumC: 0, count: 0, minR: row, maxR: row, minC: col, maxC: col };
+      var key = ((row / cell) | 0) + ":" + ((col / cell) | 0);
+      if (!buckets[key]) {
+        buckets[key] = { sumR: 0, sumC: 0, count: 0, minR: row, maxR: row, minC: col, maxC: col };
+      }
       var b = buckets[key];
       b.sumR += row;
       b.sumC += col;
@@ -152,153 +222,385 @@
     var clusters = [];
     Object.keys(buckets).forEach(function (k) {
       var bb = buckets[k];
-      var mr = bb.sumR / bb.count;
-      var mc = bb.sumC / bb.count;
       var span = Math.max(bb.maxR - bb.minR + 1, bb.maxC - bb.minC + 1);
       clusters.push({
-        row: mr,
-        col: mc,
+        row: bb.sumR / bb.count,
+        col: bb.sumC / bb.count,
         count: bb.count,
-        radiusMod: Math.max(2.5, span * 0.75)
+        radiusMod: Math.max(2.2, span * 0.7)
       });
     });
-
     clusters.sort(function (a, b) { return b.count - a.count; });
+
     var merged = [];
     for (i = 0; i < clusters.length; i++) {
       var c = clusters[i];
       var absorbed = false;
       for (var j = 0; j < merged.length; j++) {
         var m = merged[j];
-        var dist = Math.hypot(c.row - m.row, c.col - m.col);
-        if (dist < cell * 1.1) {
+        if (hypot(c.row - m.row, c.col - m.col) < cell * 1.15) {
           var tot = m.count + c.count;
           m.row = (m.row * m.count + c.row * c.count) / tot;
           m.col = (m.col * m.count + c.col * c.count) / tot;
           m.count = tot;
-          m.radiusMod = Math.max(m.radiusMod, c.radiusMod + 1);
+          m.radiusMod = Math.max(m.radiusMod, c.radiusMod + 0.5);
           absorbed = true;
           break;
         }
       }
       if (!absorbed) merged.push(c);
     }
+    if (merged.length > 7) merged = merged.slice(0, 7);
 
-    // Cap missions so motion stays readable
-    if (merged.length > 6) merged = merged.slice(0, 6);
-
-    var now = Date.now();
-    var changeAt = meta.changeAtMs;
-    var coverMs = Math.min(220, Math.max(110, (meta.intervalMs || 1000) * 0.12));
-    var approachMs = Math.min(520, Math.max(260, (meta.intervalMs || 1000) * 0.28));
-
-    // Late plan: still fly onto QR and cover briefly
-    if (!isFinite(changeAt) || changeAt < now + 40) {
-      changeAt = now + Math.min(120, approachMs * 0.35);
-      approachMs = Math.max(80, changeAt - now);
-    }
-
-    var leaveAt = changeAt + coverMs;
-    var approachAt = changeAt - approachMs;
-
-    this.qrRect = qr;
-    this.missions = merged.map(function (cl) {
-      var x = qr.left + (cl.col + margin + 0.5) * cellW;
-      var y = qr.top + (cl.row + margin + 0.5) * cellH;
-      var radius = Math.max(24, Math.min(64, cl.radiusMod * Math.max(cellW, cellH) * 1.05));
+    return merged.map(function (cl) {
       return {
-        x: x,
-        y: y,
-        r: radius,
-        approachAt: approachAt,
-        coverAt: changeAt,
-        leaveAt: leaveAt,
-        assigned: null
+        x: qr.left + (cl.col + margin + 0.5) * cellW,
+        y: qr.top + (cl.row + margin + 0.5) * cellH,
+        r: Math.max(22, Math.min(48, cl.radiusMod * Math.max(cellW, cellH) * 0.95)),
+        count: cl.count,
+        assigned: null,
+        covered: false
       };
     });
+  };
 
-    this.ensureBallCount(Math.max(3, this.missions.length));
-    for (i = 0; i < this.missions.length; i++) {
-      this.missions[i].assigned = this.balls[i];
-      this.balls[i].r = this.missions[i].r;
-      this.balls[i].el.style.width = this.missions[i].r * 2 + "px";
-      this.balls[i].el.style.height = this.missions[i].r * 2 + "px";
-      this.balls[i].mission = this.missions[i];
-      // Kick into approach immediately if window already open
-      this.balls[i].mode = now >= approachAt ? "approach" : "idle";
-    }
-    for (; i < this.balls.length; i++) {
-      this.balls[i].mission = null;
-      this.balls[i].mode = "idle";
+  /**
+   * events: [{ slot, changeAtMs, moduleSize, margin, diffs: [[r,c],...] }, ...]
+   * Sorted soonest-first. Replaces forecast and reassigns bounce aims.
+   */
+  MaskBalls.prototype.setForecast = function (events, meta) {
+    if (!this.enabled) return;
+    this.intervalMs = (meta && meta.intervalMs) || this.intervalMs || 1000;
+    var qr = this.getQrRect();
+    this.qrRect = qr;
+    if (!qr || !events || !events.length) {
+      this.events = [];
+      this.clearAssignments();
+      return;
     }
 
-    this.onLog("Mask balls planned", {
-      clusters: this.missions.length,
-      diffs: moduleDiffs.length,
-      approachMs: Math.round(approachMs),
+    if (!this.balls.length) this.spawnPalette();
+
+    var coverMs = clamp(this.intervalMs * 0.045, MIN_COVER_MS, MAX_COVER_MS);
+    var now = Date.now();
+    var built = [];
+    for (var i = 0; i < events.length; i++) {
+      var ev = events[i];
+      if (!ev.diffs || !ev.diffs.length) continue;
+      if (ev.changeAtMs + coverMs < now - 30) continue;
+      var targets = this.clusterDiffs(ev.diffs, ev, qr);
+      if (!targets.length) continue;
+      built.push({
+        slot: ev.slot,
+        changeAtMs: ev.changeAtMs,
+        coverMs: coverMs,
+        targets: targets
+      });
+    }
+    this.events = built;
+    for (i = 0; i < this.balls.length; i++) {
+      this.balls[i].pendingAngle = null;
+    }
+    this.assignAndAim(now);
+    this.onLog("Mask forecast", {
+      events: built.length,
+      targets: built.reduce(function (n, e) { return n + e.targets.length; }, 0),
       coverMs: Math.round(coverMs),
-      inMs: Math.round(changeAt - now)
+      horizon: built.length ? Math.round((built[built.length - 1].changeAtMs - now) / 1000) + "s" : "0"
     });
     this.startLoop();
   };
 
-  MaskBalls.prototype.notifyChanged = function () {
-    var now = Date.now();
+  /** Back-compat single-step planner */
+  MaskBalls.prototype.planForDiffs = function (moduleDiffs, meta) {
+    this.setForecast([{
+      slot: meta.slot || 0,
+      changeAtMs: meta.changeAtMs,
+      moduleSize: meta.moduleSize,
+      margin: meta.margin || 2,
+      diffs: moduleDiffs
+    }], { intervalMs: meta.intervalMs });
+  };
+
+  MaskBalls.prototype.clearAssignments = function () {
+    for (var i = 0; i < this.balls.length; i++) {
+      this.balls[i].queue = [];
+      this.balls[i].pendingAngle = null;
+      this.balls[i].el.classList.remove("is-cover");
+    }
+  };
+
+  MaskBalls.prototype.pruneBallQueues = function (now) {
     for (var i = 0; i < this.balls.length; i++) {
       var ball = this.balls[i];
-      if (ball.mission && now >= ball.mission.coverAt) {
-        ball.mode = "retreat";
-        // Shorten leave so balls clear for scanning
-        if (ball.mission.leaveAt > now + 80) ball.mission.leaveAt = now + 80;
+      ball.queue = (ball.queue || []).filter(function (a) {
+        return a.changeAtMs + a.coverMs > now - 20;
+      });
+      if (!ball.queue.length) ball.el.classList.remove("is-cover");
+    }
+  };
+
+  MaskBalls.prototype.notifyChanged = function () {
+    var now = Date.now();
+    this.events = this.events.filter(function (ev) {
+      return ev.changeAtMs + ev.coverMs > now - 20;
+    });
+    this.pruneBallQueues(now);
+  };
+
+  /** Simulate specular path; return {tBounce, x, y, wall} for first bounce, or null. */
+  MaskBalls.prototype.nextBounce = function (ball, maxT) {
+    var bounds = this.playBounds(ball);
+    var vx = ball.vx;
+    var vy = ball.vy;
+    if (Math.abs(vx) < 1e-6 && Math.abs(vy) < 1e-6) return null;
+    var tx = Infinity;
+    var ty = Infinity;
+    var wallX = null;
+    var wallY = null;
+    if (vx > 0) {
+      tx = (bounds.R - ball.x) / vx;
+      wallX = "R";
+    } else if (vx < 0) {
+      tx = (bounds.L - ball.x) / vx;
+      wallX = "L";
+    }
+    if (vy > 0) {
+      ty = (bounds.B - ball.y) / vy;
+      wallY = "B";
+    } else if (vy < 0) {
+      ty = (bounds.T - ball.y) / vy;
+      wallY = "T";
+    }
+    var t = Math.min(tx, ty);
+    if (!isFinite(t) || t < 0 || t > maxT) return null;
+    var wall = t === tx ? wallX : wallY;
+    // Corner: both
+    if (Math.abs(tx - ty) < 1e-6) wall = (wallX || "") + (wallY || "");
+    return {
+      t: t,
+      x: ball.x + vx * t,
+      y: ball.y + vy * t,
+      wall: wall
+    };
+  };
+
+  /** Will current specular trajectory graze target near changeAt? */
+  MaskBalls.prototype.trajectoryCovers = function (ball, target, changeAtMs, coverMs, now) {
+    var tHit = (changeAtMs - now) / 1000;
+    if (tHit < 0 || tHit > 12) return false;
+    var sim = {
+      x: ball.x,
+      y: ball.y,
+      vx: ball.vx,
+      vy: ball.vy,
+      r: ball.r,
+      speed: ball.speed
+    };
+    var elapsed = 0;
+    var steps = 0;
+    while (elapsed < tHit + coverMs / 1000 && steps < 40) {
+      var remain = tHit + coverMs / 1000 - elapsed;
+      var nb = this.nextBounce(sim, remain + 1e-4);
+      var dt = nb ? Math.min(nb.t, remain) : remain;
+      var x1 = sim.x + sim.vx * dt;
+      var y1 = sim.y + sim.vy * dt;
+      // Closest approach on this segment to target
+      var dx = x1 - sim.x;
+      var dy = y1 - sim.y;
+      var len2 = dx * dx + dy * dy;
+      var closestDist;
+      if (len2 < 1e-8) {
+        closestDist = hypot(sim.x - target.x, sim.y - target.y);
+      } else {
+        var u = clamp(((target.x - sim.x) * dx + (target.y - sim.y) * dy) / len2, 0, 1);
+        var cx = sim.x + u * dx;
+        var cy = sim.y + u * dy;
+        closestDist = hypot(cx - target.x, cy - target.y);
+        var tSeg = elapsed + u * dt;
+        if (closestDist <= ball.r + target.r * 0.35 &&
+            Math.abs(tSeg - tHit) <= (coverMs / 1000) * 0.9) {
+          return true;
+        }
+      }
+      if (!nb || dt < nb.t - 1e-6) break;
+      sim.x = nb.x;
+      sim.y = nb.y;
+      elapsed += nb.t;
+      // Specular
+      if (nb.wall.indexOf("L") >= 0 || nb.wall.indexOf("R") >= 0) sim.vx = -sim.vx;
+      if (nb.wall.indexOf("T") >= 0 || nb.wall.indexOf("B") >= 0) sim.vy = -sim.vy;
+      steps++;
+    }
+    return false;
+  };
+
+  MaskBalls.prototype.ballFreeFor = function (ball, changeAtMs, coverMs) {
+    var q = ball.queue || [];
+    for (var i = 0; i < q.length; i++) {
+      var a = q[i];
+      // Overlapping graze windows → busy
+      if (Math.abs(a.changeAtMs - changeAtMs) < (a.coverMs + coverMs + 80)) return false;
+    }
+    return true;
+  };
+
+  MaskBalls.prototype.assignAndAim = function (now) {
+    for (var i = 0; i < this.balls.length; i++) {
+      this.balls[i].queue = [];
+      this.balls[i].el.classList.remove("is-cover");
+    }
+    // Aim only for the soonest job per ball (first bounce decision)
+    var aimForBall = {};
+
+    for (var ei = 0; ei < this.events.length; ei++) {
+      var ev = this.events[ei];
+      for (var ti = 0; ti < ev.targets.length; ti++) {
+        var target = ev.targets[ti];
+        var chosen = null;
+        var chosenScore = Infinity;
+        var chosenAng = null;
+
+        for (var bi = 0; bi < this.balls.length; bi++) {
+          var ball = this.balls[bi];
+          if (!this.ballFreeFor(ball, ev.changeAtMs, ev.coverMs)) continue;
+          if (this.trajectoryCovers(ball, target, ev.changeAtMs, ev.coverMs, now)) {
+            var score = Math.abs(ev.changeAtMs - now);
+            if (score < chosenScore) {
+              chosenScore = score;
+              chosen = bi;
+              chosenAng = null;
+            }
+          }
+        }
+
+        if (chosen == null) {
+          for (bi = 0; bi < this.balls.length; bi++) {
+            ball = this.balls[bi];
+            if (!this.ballFreeFor(ball, ev.changeAtMs, ev.coverMs)) continue;
+            var tAvail = (ev.changeAtMs - now) / 1000;
+            if (tAvail < 0.05) continue;
+            var nb = this.nextBounce(ball, tAvail);
+            if (!nb) continue;
+            var travel = ball.speed * Math.max(0.04, tAvail - nb.t);
+            var ang = this.aimAngleFromBounce(nb.x, nb.y, target, travel, ball);
+            if (ang == null) continue;
+            score = nb.t * 1000 + Math.abs(travel - hypot(target.x - nb.x, target.y - nb.y));
+            if (score < chosenScore) {
+              chosenScore = score;
+              chosen = bi;
+              chosenAng = ang;
+            }
+          }
+        }
+
+        if (chosen == null) {
+          for (bi = 0; bi < this.balls.length; bi++) {
+            ball = this.balls[bi];
+            if (!this.ballFreeFor(ball, ev.changeAtMs, ev.coverMs)) continue;
+            tAvail = (ev.changeAtMs - now) / 1000;
+            nb = this.nextBounce(ball, Math.max(tAvail, 2.5));
+            if (!nb) continue;
+            travel = ball.speed * Math.max(0.04, Math.max(0.05, tAvail - nb.t));
+            ang = this.aimAngleFromBounce(nb.x, nb.y, target, travel, ball);
+            score = hypot(ball.x - target.x, ball.y - target.y) + nb.t * 200;
+            if (ang == null) {
+              ang = Math.atan2(target.y - nb.y, target.x - nb.x);
+              score += 500;
+            }
+            if (score < chosenScore) {
+              chosenScore = score;
+              chosen = bi;
+              chosenAng = ang;
+            }
+          }
+        }
+
+        if (chosen != null) {
+          ball = this.balls[chosen];
+          target.assigned = ball.colorId;
+          var job = {
+            changeAtMs: ev.changeAtMs,
+            coverMs: ev.coverMs,
+            x: target.x,
+            y: target.y,
+            r: target.r,
+            slot: ev.slot
+          };
+          ball.queue.push(job);
+          // Pending bounce angle only for the earliest job of this ball
+          if (aimForBall[chosen] == null || job.changeAtMs < aimForBall[chosen].changeAtMs) {
+            aimForBall[chosen] = { job: job, ang: chosenAng };
+          }
+        }
+      }
+    }
+
+    for (bi = 0; bi < this.balls.length; bi++) {
+      ball = this.balls[bi];
+      ball.queue.sort(function (a, b) { return a.changeAtMs - b.changeAtMs; });
+      var aim = aimForBall[bi];
+      if (!aim) {
+        ball.pendingAngle = null;
+        continue;
+      }
+      if (aim.ang != null) {
+        ball.pendingAngle = aim.ang;
+      } else {
+        tAvail = (aim.job.changeAtMs - now) / 1000;
+        nb = this.nextBounce(ball, tAvail);
+        if (nb) {
+          travel = ball.speed * Math.max(0.04, tAvail - nb.t);
+          ang = this.aimAngleFromBounce(nb.x, nb.y, aim.job, travel, ball);
+          ball.pendingAngle = ang;
+        }
       }
     }
   };
 
-  MaskBalls.prototype.bounce = function (ball, dt, w, h) {
-    ball.x += ball.vx * dt;
-    ball.y += ball.vy * dt;
-    if (ball.x < ball.r) {
-      ball.x = ball.r;
-      ball.vx = Math.abs(ball.vx);
-    } else if (ball.x > w - ball.r) {
-      ball.x = w - ball.r;
-      ball.vx = -Math.abs(ball.vx);
-    }
-    if (ball.y < ball.r) {
-      ball.y = ball.r;
-      ball.vy = Math.abs(ball.vy);
-    } else if (ball.y > h - ball.r) {
-      ball.y = h - ball.r;
-      ball.vy = -Math.abs(ball.vy);
-    }
-  };
+  /**
+   * Integrate motion; on wall hit apply pending aimed angle OR specular reflect.
+   * No mid-air steering.
+   */
+  MaskBalls.prototype.integrate = function (ball, dt) {
+    var bounds = this.playBounds(ball);
+    var remaining = dt;
+    var guard = 0;
+    while (remaining > 1e-6 && guard++ < 8) {
+      var nb = this.nextBounce(ball, remaining + 1e-5);
+      if (!nb || nb.t > remaining) {
+        ball.x += ball.vx * remaining;
+        ball.y += ball.vy * remaining;
+        remaining = 0;
+        break;
+      }
+      ball.x = nb.x;
+      ball.y = nb.y;
+      remaining -= nb.t;
 
-  MaskBalls.prototype.steerTo = function (ball, tx, ty, speed) {
-    var dx = tx - ball.x;
-    var dy = ty - ball.y;
-    var dist = Math.hypot(dx, dy) || 1;
-    ball.vx = (dx / dist) * speed;
-    ball.vy = (dy / dist) * speed;
-  };
+      if (ball.pendingAngle != null) {
+        var ang = ball.pendingAngle;
+        ball.pendingAngle = null;
+        ball.vx = Math.cos(ang) * ball.speed;
+        ball.vy = Math.sin(ang) * ball.speed;
+      } else {
+        // Specular reflection — only angle change allowed
+        if (nb.wall.indexOf("L") >= 0 || nb.wall.indexOf("R") >= 0) {
+          ball.vx = -ball.vx;
+        }
+        if (nb.wall.indexOf("T") >= 0 || nb.wall.indexOf("B") >= 0) {
+          ball.vy = -ball.vy;
+        }
+      }
+      // Renormalize speed (numerical drift)
+      var sp = hypot(ball.vx, ball.vy) || ball.speed;
+      ball.vx = (ball.vx / sp) * ball.speed;
+      ball.vy = (ball.vy / sp) * ball.speed;
 
-  /** Idle only: keep clear of QR so the code stays scannable between covers. */
-  MaskBalls.prototype.avoidQrCenter = function (ball, qr) {
-    if (!qr) return;
-    var cx = qr.left + qr.width / 2;
-    var cy = qr.top + qr.height / 2;
-    var pad = 28;
-    var inside =
-      ball.x > qr.left - pad &&
-      ball.x < qr.left + qr.width + pad &&
-      ball.y > qr.top - pad &&
-      ball.y < qr.top + qr.height + pad;
-    if (!inside) return;
-    var dx = ball.x - cx;
-    var dy = ball.y - cy;
-    var dist = Math.hypot(dx, dy) || 1;
-    var speed = Math.hypot(ball.vx, ball.vy) || 240;
-    ball.vx = (dx / dist) * speed;
-    ball.vy = (dy / dist) * speed;
+      // Nudge inside bounds
+      ball.x = clamp(ball.x, bounds.L, bounds.R);
+      ball.y = clamp(ball.y, bounds.T, bounds.B);
+    }
   };
 
   MaskBalls.prototype.tick = function (ts) {
@@ -306,71 +608,28 @@
     if (!this.lastTs) this.lastTs = ts;
     var dt = Math.min(0.05, (ts - this.lastTs) / 1000);
     this.lastTs = ts;
-    var w = window.innerWidth;
-    var h = window.innerHeight;
-    var qr = this.getQrRect();
-    // MUST match changeAtMs from app (wall clock), not performance.now()
     var now = Date.now();
 
     for (var i = 0; i < this.balls.length; i++) {
       var ball = this.balls[i];
-      var m = ball.mission;
+      this.integrate(ball, dt);
 
-      if (m && now >= m.approachAt && now < m.coverAt) {
-        ball.mode = "approach";
-        var remain = Math.max(0.04, (m.coverAt - now) / 1000);
-        var need = Math.hypot(m.x - ball.x, m.y - ball.y);
-        var speed = clamp(need / remain, 320, 1800);
-        this.steerTo(ball, m.x, m.y, speed);
-        this.bounce(ball, dt, w, h);
-        // Soft snap late in approach — over the QR is intended
-        if (now > m.coverAt - 60) {
-          ball.x += (m.x - ball.x) * 0.55;
-          ball.y += (m.y - ball.y) * 0.55;
-        }
-      } else if (m && now >= m.coverAt && now < m.leaveAt) {
-        ball.mode = "cover";
-        ball.x = m.x;
-        ball.y = m.y;
-        ball.vx = 0;
-        ball.vy = 0;
-      } else if (m && (now >= m.leaveAt || ball.mode === "retreat")) {
-        ball.mode = "retreat";
-        var tx = ball.x < w / 2 ? ball.r + 8 : w - ball.r - 8;
-        var ty = ball.y < h / 2 ? ball.r + 8 : h - ball.r - 8;
-        if (qr) {
-          tx = Math.abs(qr.left - 0) > Math.abs(w - (qr.left + qr.width))
-            ? ball.r + 10
-            : w - ball.r - 10;
-          ty = clamp(ball.y, ball.r + 8, h - ball.r - 8);
-        }
-        this.steerTo(ball, tx, ty, 1000);
-        this.bounce(ball, dt, w, h);
-        if (Math.hypot(ball.x - tx, ball.y - ty) < 28 || now > m.leaveAt + 600) {
-          ball.mission = null;
-          ball.mode = "idle";
-          var ang = Math.random() * Math.PI * 2;
-          var spd = 200 + Math.random() * 160;
-          ball.vx = Math.cos(ang) * spd;
-          ball.vy = Math.sin(ang) * spd;
-        }
-      } else {
-        ball.mode = "idle";
-        var cur = Math.hypot(ball.vx, ball.vy);
-        if (cur < 160) {
-          ball.vx *= 1.05;
-          ball.vy *= 1.05;
-        } else if (cur > 380) {
-          ball.vx *= 0.98;
-          ball.vy *= 0.98;
-        }
-        this.bounce(ball, dt, w, h);
-        this.avoidQrCenter(ball, qr);
+      var covering = false;
+      var q = ball.queue || [];
+      for (var qi = 0; qi < q.length; qi++) {
+        var a = q[qi];
+        var dist = hypot(ball.x - a.x, ball.y - a.y);
+        var inTime = now >= a.changeAtMs - a.coverMs && now <= a.changeAtMs + a.coverMs;
+        if (inTime && dist <= ball.r + a.r * 0.55) covering = true;
       }
-
-      ball.el.classList.toggle("is-cover", ball.mode === "cover" || ball.mode === "approach");
+      ball.el.classList.toggle("is-cover", covering);
       this.place(ball);
     }
+
+    this.events = this.events.filter(function (ev) {
+      return ev.changeAtMs + ev.coverMs > now - 40;
+    });
+    this.pruneBallQueues(now);
 
     this.raf = requestAnimationFrame(this.tick.bind(this));
   };
@@ -386,6 +645,9 @@
     this.raf = 0;
     this.lastTs = 0;
   };
+
+  // Expose for debug
+  MaskBalls.COLORS = BALL_COLORS;
 
   global.MaskBalls = MaskBalls;
 })(typeof window !== "undefined" ? window : globalThis);
