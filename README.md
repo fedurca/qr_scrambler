@@ -72,7 +72,7 @@ Každý snímek se inkoustí jen **ne-rezervované datové moduly** (nikdy finde
 ## UI
 
 - černé pozadí, QR uprostřed, pod QR aktuální URL
-- **Interval epochy (s)** – jak často se QR přegeneruje (default 1 s)
+- **Změn za vteřinu** (1–1000) – kolikrát za sekundu se QR přegeneruje. Číselný epoch v URL zůstává v celých sekundách (čtečka čte správný čas); pro sub-sekundové snímky se do padu vloží token slotu, takže i v rámci jedné vteřiny je každý snímek jiný a min-change stabilizér ho drží minimální. Při vysokých hodnotách běží generátor tak rychle, jak stíhá (rozpočet na snímek se zkracuje)
 - **Maskování** – 5 variant předblikávání měněných modulů (default Změny + sníh)
 - title stránky nese semver (`het68 QR vX.Y.Z`, viz `package.json`)
 - debug: version, engine, decoder, ecc/ver, mask, epoch, raw Δ, flips, %, ~CSS px

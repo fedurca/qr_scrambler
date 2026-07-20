@@ -41,8 +41,8 @@ ${css}
 <body>
   <section id="controls" aria-label="Nastavení">
     <label>
-      Interval epochy (s)
-      <input id="epoch-interval" type="number" min="1" max="120" step="1" value="1" />
+      Změn za vteřinu
+      <input id="changes-per-sec" type="number" min="1" max="1000" step="1" value="1" />
     </label>
     <label>
       Maskování

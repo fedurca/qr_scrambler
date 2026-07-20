@@ -94,7 +94,7 @@
     prefetch: null,
     renderMode: "none",
     paintEl: null,
-    epochIntervalSec: 1,
+    changesPerSec: 1,
     maskBalls: null,
     maskFx: null,
     maskMethod: "snow3",
@@ -108,20 +108,42 @@
     lastPlanSnap: null
   };
 
-  function getEpochIntervalSec() {
-    var n = parseInt(state.epochIntervalSec, 10);
+  // Updates per second (1..1000). >1 means the QR re-scrambles multiple times per
+  // second: the numeric epoch stays in whole seconds (so a scanner reads the right
+  // time), while a per-slot token in the pad forces a fresh minimal-change frame.
+  function getRate() {
+    var n = parseInt(state.changesPerSec, 10);
     if (!isFinite(n) || n < 1) return 1;
-    if (n > 120) return 120;
+    if (n > 1000) return 1000;
     return n;
   }
 
+  /** Milliseconds per update slot. */
+  function getStepMs() {
+    return 1000 / getRate();
+  }
+
   function currentSlot() {
-    return Math.floor(Date.now() / 1000 / getEpochIntervalSec());
+    return Math.floor(Date.now() / getStepMs());
   }
 
   function slotChangeAtMs(slot) {
-    // Wall-clock ms when this slot index begins.
-    return slot * getEpochIntervalSec() * 1000;
+    return slot * getStepMs();
+  }
+
+  /** Receiver-facing epoch (whole unix seconds) for a slot. */
+  function epochForSlot(slot) {
+    return Math.floor(slotChangeAtMs(slot) / 1000);
+  }
+
+  /** Deterministic pad for a slot so consecutive frames differ (forces a change)
+   *  even within the same second; low-order chars vary fastest for minimal churn. */
+  function padForSlot(slot) {
+    var P = state.padLen | 0;
+    if (P <= 0) return "";
+    var tok = (slot >>> 0).toString(36).toUpperCase();
+    if (tok.length > P) return tok.slice(-P);
+    return new Array(P - tok.length + 1).join("0") + tok;
   }
 
   function estimateCssPx(flips, modules) {
@@ -828,6 +850,31 @@
     return out;
   }
 
+  /** Min-raw-diff mask for a FIXED pad (no pad mutation) — used by sub-second frames. */
+  function scanMask(api, epoch, pad, prevModules) {
+    var best = null;
+    for (var mask = 0; mask < 8; mask++) {
+      var url = buildUrl(epoch, pad);
+      var modules = createModules(api, url, mask);
+      var raw = prevModules ? listDiffs(prevModules, modules).length : 0;
+      if (!best || raw < best.raw) best = { url: url, pad: pad, mask: mask, modules: modules, raw: raw };
+    }
+    return best;
+  }
+
+  /** Build a minimal-change frame for a fixed (slot-derived) pad. */
+  async function buildFrameFixedPad(api, epoch, pad, prevModules, budgetMs, shouldCancel) {
+    var canon = scanMask(api, epoch, pad, prevModules);
+    if (!prevModules) {
+      return {
+        canonical: canon,
+        result: { modules: copyModules(canon.modules), flips: 0, raw: 0, orders: 0, mode: "initial" }
+      };
+    }
+    var result = await stabilize(prevModules, canon.modules, canon.url, budgetMs, shouldCancel);
+    return { canonical: canon, result: result };
+  }
+
   async function buildFrame(api, epoch, prevModules, prevPad, budgetMs, shouldCancel) {
     if (!prevModules) {
       var first = chooseCanonical(api, epoch, prevModules, prevPad || state.pad);
@@ -965,14 +1012,12 @@
     var cur = state.prevModules;
     var size = moduleSize(cur);
     var freq = new Uint16Array(size * size);
-    var interval = getEpochIntervalSec();
     var baseSlot = currentSlot();
     var mods = cur;
-    var pad = state.pad;
     for (var step = 1; step <= steps; step++) {
       if (shouldCancel && shouldCancel()) return;
-      var epoch = (baseSlot + step) * interval;
-      var canon = chooseCanonical(state.api, epoch, mods, pad);
+      var slot = baseSlot + step;
+      var canon = scanMask(state.api, epochForSlot(slot), padForSlot(slot), mods);
       var f = canon.modules;
       for (var r = 0; r < size; r++) {
         for (var c = 0; c < size; c++) {
@@ -980,7 +1025,6 @@
         }
       }
       mods = f;
-      pad = canon.pad;
       if (step % 4 === 0) await yieldToBrowser();
     }
     var cells = [];
@@ -1038,7 +1082,7 @@
 
   function pushForecastToBalls(events) {
     if (!state.maskBalls || !state.maskBalls.enabled) return;
-    state.maskBalls.setForecast(events, { intervalMs: getEpochIntervalSec() * 1000 });
+    state.maskBalls.setForecast(events, { intervalMs: getStepMs() });
     var n = 0;
     var flips = [];
     for (var i = 0; i < events.length; i++) {
@@ -1077,48 +1121,47 @@
   function startPrefetch(slotJustShown) {
     if (!state.api || !state.prevModules) return;
     cancelPrefetch();
-    var interval = getEpochIntervalSec();
+    var stepMs = getStepMs();
     // With balls on: next flip is critical; 2–3 steps ahead is enough travel time
     var horizon = state.maskBalls && state.maskBalls.enabled
       ? Math.max(2, Math.min(3, state.forecastHorizon | 0))
       : Math.max(1, Math.min(6, state.forecastSteps | 0 || 1));
     var nextSlot = slotJustShown + 1;
-    var nextEpoch = nextSlot * interval;
     var token = {
       cancelled: false,
       slot: nextSlot,
-      epoch: nextEpoch,
+      epoch: epochForSlot(nextSlot),
       ready: null,
       horizon: horizon
     };
     state.prefetch = token;
 
     var changeAt = slotChangeAtMs(nextSlot);
-    var msLeft = Math.max(200, changeAt - Date.now() - 40);
-    var budget1 = Math.min(PREFETCH_BUDGET_MS, Math.max(STABILIZE_BUDGET_MS, msLeft * 0.85));
+    var msLeft = Math.max(80, changeAt - Date.now() - 20);
+    var budget1 = Math.min(PREFETCH_BUDGET_MS, Math.max(60, Math.min(STABILIZE_BUDGET_MS, msLeft * 0.85)));
 
     token.ready = (async function () {
       var mods = state.prevModules;
-      var pad = state.pad;
       var events = [];
       var firstFrame = null;
 
       for (var step = 1; step <= horizon; step++) {
         if (token.cancelled) return null;
         var slot = slotJustShown + step;
-        var epoch = slot * interval;
+        var epoch = epochForSlot(slot);
+        var pad = padForSlot(slot);
         // Keep later horizon steps useful — do not collapse budget to near-zero
         var budget = step === 1
           ? budget1
           : Math.min(
               IS_MOBILE ? 280 : 420,
-              Math.max(IS_MOBILE ? 140 : 200, budget1 * Math.max(0.28, 0.72 - step * 0.05))
+              Math.max(IS_MOBILE ? 120 : 160, budget1 * Math.max(0.28, 0.72 - step * 0.05))
             );
-        var frame = await buildFrame(
+        var frame = await buildFrameFixedPad(
           state.api,
           epoch,
-          mods,
           pad,
+          mods,
           budget,
           function () { return token.cancelled; }
         );
@@ -1144,7 +1187,6 @@
           pushForecastToBalls(events.slice());
         }
         mods = frame.result.modules;
-        pad = frame.canonical.pad;
         await yieldToBrowser();
       }
 
@@ -1346,7 +1388,7 @@
     var pct = total ? ((100 * result.flips) / total).toFixed(3) : "0";
     setMeta("d-pct", pct + "%");
     setMeta("d-csspx", String(estimateCssPx(result.flips, result.modules)));
-    setMeta("d-interval", getEpochIntervalSec() + " s");
+    setMeta("d-interval", getRate() + " /s");
 
     state.renders += 1;
     setMeta("d-renders", String(state.renders));
@@ -1389,7 +1431,7 @@
         pct: pct + "%",
         cssPx: estimateCssPx(result.flips, result.modules),
         epoch: decodedEpoch,
-        interval: getEpochIntervalSec(),
+        rate: getRate(),
         render: state.renderMode,
         prefetch: !!fromPrefetch,
         ms: Date.now() - started
@@ -1401,14 +1443,14 @@
 
   function tick() {
     if (state.busy) return;
-    var interval = getEpochIntervalSec();
+    var stepMs = getStepMs();
     var slot = currentSlot();
-    var slotKey = String(slot) + "@" + interval;
+    var slotKey = String(slot);
     if (slotKey === state.lastSlot) return;
     state.lastSlot = slotKey;
 
-    // Encode the unix epoch at the moment of the step (not the slot index).
-    var epoch = Math.floor(Date.now() / 1000);
+    var epoch = epochForSlot(slot);
+    var pad = padForSlot(slot);
     state.lastEpoch = String(epoch);
     state.busy = true;
     var started = Date.now();
@@ -1416,7 +1458,7 @@
     Promise.resolve()
       .then(async function () {
         if (state.simpleRenderer && !state.api) {
-          var simpleUrl = buildUrl(epoch, state.pad || "0");
+          var simpleUrl = buildUrl(epoch, pad || "0");
           state.simpleRenderer(simpleUrl);
           state.lastUrl = simpleUrl;
           urlEl.textContent = simpleUrl;
@@ -1430,11 +1472,10 @@
         }
 
         // Immediate canonical paint so mobile never stays blank during search.
-        // For deferred-swap methods (crossfade) keep the previous frame on screen
-        // so the change fades in from it instead of popping to the canonical.
+        // For deferred-swap methods (crossfade) keep the previous frame on screen.
         var deferSwap = state.prevModules && state.maskFx && state.maskFx.wantsDeferredSwap();
         if (!deferSwap) {
-          var quick = chooseCanonical(state.api, epoch, state.prevModules, state.pad);
+          var quick = scanMask(state.api, epoch, pad, state.prevModules);
           drawModules(quick.modules);
           urlEl.textContent = quick.url;
           setMeta("d-url", quick.url);
@@ -1447,20 +1488,17 @@
         if (pre && pre.slot === slot && pre.ready) {
           var pref = await pre.ready;
           if (pref && pref.canonical && pref.result) {
-            var prefEpoch = codec.decodePayload(pref.canonical.url);
-            if (prefEpoch === epoch) {
+            if (codec.decodePayload(pref.canonical.url) === epoch) {
               applyFrame(epoch, pref.canonical, pref.result, started, true);
               return;
             }
-            // Prediction drifted by a second — keep matrix search warm via rebuild.
-            log("Prefetch epoch drift", { prefEpoch: prefEpoch, epoch: epoch });
           }
         }
 
         cancelPrefetch();
         var msIntoSlot = Date.now() - slotChangeAtMs(slot);
-        var budget = Math.max(120, Math.min(STABILIZE_BUDGET_MS, interval * 1000 - msIntoSlot - 40));
-        var frame = await buildFrame(state.api, epoch, state.prevModules, state.pad, budget, null);
+        var budget = Math.max(8, Math.min(STABILIZE_BUDGET_MS, stepMs - msIntoSlot - 5));
+        var frame = await buildFrameFixedPad(state.api, epoch, pad, state.prevModules, budget, null);
         applyFrame(epoch, frame.canonical, frame.result, started, false);
       })
       .catch(function (err) {
@@ -1517,8 +1555,15 @@
     if (c) document.body.style.paddingTop = (c.offsetHeight + 20) + "px";
   }
 
+  function restartTimer() {
+    if (state.timer) clearInterval(state.timer);
+    // Fire fast enough for the rate; the busy-gate + slot dedup prevent overlap.
+    var period = Math.max(5, Math.min(250, Math.round(getStepMs())));
+    state.timer = setInterval(tick, period);
+  }
+
   function bindControls() {
-    var intervalInput = document.getElementById("epoch-interval");
+    var rateInput = document.getElementById("changes-per-sec");
     var methodSelect = document.getElementById("mask-method");
 
     adjustLayout();
@@ -1549,18 +1594,18 @@
       });
     }
 
-    if (intervalInput) {
-      state.epochIntervalSec = parseInt(intervalInput.value, 10) || 5;
-      setMeta("d-interval", getEpochIntervalSec() + " s");
-      intervalInput.addEventListener("change", function () {
-        state.epochIntervalSec = parseInt(intervalInput.value, 10) || 5;
-        intervalInput.value = String(getEpochIntervalSec());
-        setMeta("d-interval", getEpochIntervalSec() + " s");
+    if (rateInput) {
+      state.changesPerSec = parseInt(rateInput.value, 10) || 1;
+      setMeta("d-interval", getRate() + " /s");
+      rateInput.addEventListener("change", function () {
+        state.changesPerSec = parseInt(rateInput.value, 10) || 1;
+        rateInput.value = String(getRate());
+        setMeta("d-interval", getRate() + " /s");
         cancelPrefetch();
         state.lastSlot = "";
-        // Drop stale timed jobs — slot clock changed with the interval
         if (state.maskBalls) state.maskBalls.clearAssignments();
-        log("Epoch interval set", getEpochIntervalSec() + "s");
+        log("Changes per second set", getRate());
+        restartTimer();
         tick();
       });
     }
@@ -1600,7 +1645,7 @@
               mobile: IS_MOBILE,
               decodeScale: DECODE_SCALE,
               stabilizeMs: STABILIZE_BUDGET_MS,
-              intervalSec: getEpochIntervalSec()
+              changesPerSec: getRate()
             });
           });
         }
@@ -1612,8 +1657,7 @@
       })
       .then(function () {
         tick();
-        if (state.timer) clearInterval(state.timer);
-        state.timer = setInterval(tick, 100);
+        restartTimer();
         // Non-blocking tuning aid: compare grid profiles a few seconds after boot.
         if (state.api && state.decoder) {
           setTimeout(function () {
@@ -1657,7 +1701,7 @@
       mobile: IS_MOBILE,
       version: VERSION,
       ecc: ECC,
-      epochIntervalSec: getEpochIntervalSec(),
+      changesPerSec: getRate(),
       maskMethod: state.maskMethod,
       maskBalls: !!(state.maskBalls && state.maskBalls.enabled),
       padLen: state.padLen,
