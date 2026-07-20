@@ -21,6 +21,7 @@ var qrcode = read("vendor/qrcode.min.js");
 var jsqr = read("vendor/jsQR.js");
 var versionJs = "window.APP_VERSION=" + JSON.stringify(version) + ";\n";
 var codec = read("js/codec.js");
+var qrStructure = read("js/qr-structure.js");
 var maskBalls = read("js/mask-balls.js");
 var app = read("js/app.js");
 
@@ -106,6 +107,9 @@ ${versionJs}
   </script>
   <script>
 ${codec}
+  </script>
+  <script>
+${qrStructure}
   </script>
   <script>
 ${maskBalls}
