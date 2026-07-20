@@ -107,6 +107,23 @@ npm run build   # → index.html se vším inline (QR lib, jsQR, CSS, app)
 
 Po změně zdrojů vždy znovu `npm run build` a nasaď aktualizovaný `index.html` na origin.
 
+### GitHub Pages (autodeploy)
+
+Po každém pushi na `main` (nebo ručně přes **Actions → Deploy GitHub Pages**) CI:
+
+1. spustí `npm run build`
+2. nasadí self-contained `index.html` na GitHub Pages
+
+Workflow: [`.github/workflows/pages.yml`](.github/workflows/pages.yml).
+
+Veřejná URL (project site):
+
+```text
+https://fedurca.github.io/qr_scrambler/
+```
+
+Nastavení v GitHubu: **Settings → Pages → Build and deployment → Source: GitHub Actions** (workflow to při prvním běhu obvykle zapne samo). Query parametry fungují beze změny, např. `https://fedurca.github.io/qr_scrambler/?rate=10&mask=snow2`.
+
 Modulární vývoj: `app.html` + `css/` + `js/` + `vendor/`.
 
 ## Lokální assety (CDN jen fallback)
