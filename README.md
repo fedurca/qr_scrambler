@@ -24,7 +24,7 @@ Na přijímací straně stačí po naskenování zavolat `decodePayload()` a pad
 
 ## Jak se drží minimální změna
 
-1. **Nejmenší symbol pro nejmenší změnu** – default **version 2 + ECC L** (25×25). Při 1s taktu je hlavním zdrojem změny **RS difuze**: změna jednoho epoch-bajtu přepočítá všechny EC codewordy, takže dolní mez počtu změněných modulů určuje hlavně **počet modulů symbolu**. v2 je nejmenší symbol, do kterého se payload vejde, takže mění nejméně modulů (~15 vs 28 u v4+H) a má největší, na levném telefonu nejčitelnější moduly. Kompromis: ECC-L má malou rezervu pro čtečku, takže in-QR arcade masky samy omezují množství „inkoustu". Pro nejnižší **procento**/nejmenší plochu změny lze přepnout na `{ version: 6, ecc: "M" }` (41×41, hustší) nebo `{ version: 5, ecc: "Q" }`. `VERSION`/`ECC` v `js/app.js`. Pad se dopočítává na kapacitu (`computePadLen`), takže payload nikdy nepřeteče.
+1. **Profil laděný na maskování „sněžením"** – default **version 4 + ECC H** (33×33). Výchozí maska je glitch-overlay „sněžení", které kreslí černé moduly přes kód; ty musí čtečka opravit jako chyby, takže symbol potřebuje **RS rezervu** → ECC **H** (v3+H se nevejde, v4 je nejmenší H). Sníh inkousta jen **ne-rezervované datové moduly** (ne findery/timing/format) → dekódování zůstává ~100 % v každém snímku. Pro nejmenší počet změněných modulů bez in-QR masky lze přepnout na `{ version: 2, ecc: "L" }` (~15 flipů, ale ECC-L nemá rezervu pro sníh). `VERSION`/`ECC` v `js/app.js`. Pad se dopočítává na kapacitu (`computePadLen`).
 2. **Dlouhý padding + pad hill-climb** – epoch je v dlouhém stringu, který vyplní kapacitu; volný pad se **hill-climbem** ladí tak, aby data codewordy seděly na předchozí snímek (minimalizuje raw diff před RS obětováním). Souběžně se přehledá všech 8 masek.
 3. **Analytický codeword-stabilizér** (`js/qr-structure.js`) – každý modul patří právě jednomu codewordu (deterministický zigzag placement). Dekódování přežije, dokud se od cíle liší ≤ `floor(EC/2)` codewordů; codeword s 1 rozdílným modulem stojí stejně jako s 8. Stabilizér **seskupí diffy podle codewordu** a ponechá předchozí moduly v codewordech s největší úsporou, se sekundárním **shlukováním** do souvislé oblasti. Výsledek se vždy **jednorázově ověří dekodérem**; jinak fallback na heuristické dual-direction půlení.
 4. **Top-N kandidátů** – stabilizuje se víc pad/mask kandidátů a drží se globální minimum flipů.
@@ -47,22 +47,20 @@ Hard floor: dvě různá QR data musí ležet v různých RS codeword basins; po
 
 ## Maskování změny (aby nebyla vidět)
 
-Výběr metody v UI (`Maskování`), default **crossfade**:
+Výběr metody v UI (`Maskování`), default **sněžení**:
 
 | metoda | popis |
 | --- | --- |
-| **crossfade** (default) | jen měněné buňky přejdou opacitou prev→new za ~260 ms; swap je odložen za overlay (přirozený paint gate), takže nikdy nedojde k viditelnému „lupnutí" |
-| **koule** | 7 koulí **R G B C M Y K** letí rovně, směr mění jen odrazem od okrajů; RGB aditivně, CMYK substraktivně (skupiny se nemíchají); změny se počítají dopředu a koule je krátce překryjí |
-| **shimmer** | trvalý jemný nízkokontrastní dither přes celý symbol – reálná změna zanikne v ambientní mikrodynamice |
-| **měkká záplata** | tlumený rozmazaný blob v barvě kódu krátce překryje měněné buňky, swap proběhne pod ním, pak vyprchá |
-| **snake / tetris / game of life / sněžení** | černé, na moduly zarovnané pixely kreslené **přímo v QR** (`js/mask-arcade.js`) – had prolézá kódem, glidery z Game of Life přes něj procházejí, tetromina jím propadávají, sníh po něm padá. Entity jsou řídké a stále v pohybu, takže v každém okamžiku je překryto jen pár modulů (v rámci RS korekce v4+H ~30 %), zatímco pohyb přes měněnou oblast skryje flip |
+| **sněžení** (default) | černé, na moduly zarovnané „vločky" padají a **problikávají** přes kód (`js/mask-arcade.js`) — vypadá to, jako by se kód jen vadně renderoval. Inkoustí jen **ne-rezervované datové moduly** (nikdy findery/timing/format) a drží se v rámci RS rezervy, takže kód je čitelný v **každém** snímku; problikávání zároveň maskuje sekundovou změnu |
 | **žádné** | bez maskování |
+
+Pozn.: dřívější metody (crossfade, koule, shimmer, měkká záplata, snake, tetris, game of life) zůstávají v kódu (`js/mask-methods.js`, `js/mask-arcade.js`), ale UI nabízí jen sněžení dle zadání.
 
 ## UI
 
 - černé pozadí, QR uprostřed, pod QR aktuální URL
-- **Interval epochy (s)** – jak často se QR přegeneruje (default 5 s)
-- **Maskování** – výběr metody (default crossfade)
+- **Interval epochy (s)** – jak často se QR přegeneruje (default 1 s)
+- **Maskování** – výběr metody (default sněžení)
 - title stránky nese semver (`het68 QR vX.Y.Z`, viz `package.json`)
 - debug: version, engine, decoder, ecc/ver, mask, epoch, raw Δ, flips, %, ~CSS px
 

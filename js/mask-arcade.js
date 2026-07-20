@@ -33,6 +33,7 @@
     this.margin = 2;
     this.cell = 0;       // device px per module
     this.maxInk = 20;    // max simultaneously overlaid modules (ECC-budget safe)
+    this.isReserved = null; // (row,col) -> bool: never ink function patterns
     this.state = null;
     this._loop = this.loop.bind(this);
   }
@@ -81,6 +82,7 @@
     this.cell = this.canvas.width / n;
     var frac = MaskArcade.INK_FRAC[info.ecc] != null ? MaskArcade.INK_FRAC[info.ecc] : 0.05;
     this.maxInk = Math.max(5, Math.floor(this.size * this.size * frac));
+    this.isReserved = typeof info.reserved === "function" ? info.reserved : null;
     return true;
   };
 
@@ -128,9 +130,12 @@
     this.raf = requestAnimationFrame(this._loop);
   };
 
-  /** Draw one module cell (module coords) as black. */
+  /** Draw one module cell (module coords) as black. Never inks reserved modules
+   *  (finders / timing / format / alignment) — those are structural and not
+   *  Reed-Solomon-correctable, so overlaying them would break detection. */
   MaskArcade.prototype.fillModule = function (col, row) {
     if (col < 0 || row < 0 || col >= this.size || row >= this.size) return;
+    if (this.isReserved && this.isReserved(row, col)) return;
     var px = (col + this.margin) * this.cell;
     var py = (row + this.margin) * this.cell;
     // Full-cell fill so it reads as a module (no gap seams against the code).
@@ -322,8 +327,12 @@
         if (grid[i]) this.fillModule(i % this.size, (i / this.size) | 0);
       }
     } else if (this.mode === "snow") {
+      // Blink individual flakes so it reads as a glitchy/faulty render rather
+      // than tidy snow — cells wink on/off as they drift down the code.
       var fl = this.state.flakes;
-      for (i = 0; i < fl.length; i++) this.fillModule(fl[i].x, Math.floor(fl[i].y));
+      for (i = 0; i < fl.length; i++) {
+        if (Math.random() < 0.78) this.fillModule(fl[i].x, Math.floor(fl[i].y));
+      }
     }
   };
 

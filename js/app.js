@@ -25,27 +25,24 @@
   // to capacity (see computePadLen), so payload never overflows — the only cost
   // of higher EC/version is module density, offset by a larger DRAW_SIZE.
   //
-  // Measured avg flips at 1s cadence (epoch += 1) — full pipeline, jsQR-verified:
-  //   v2+L 15 (2.44%) · v6+M 26 (1.53%) · v5+Q 30 (2.22%) · v4+H 28 (2.57%) · v3+L 29 (3.44%)
-  // The dominant driver at 1s is Reed-Solomon diffusion: one changed epoch byte
-  // recomputes every EC codeword, so the floor is set by how few modules the
-  // symbol has. v2+L is the smallest symbol that still holds the payload, so it
-  // changes the FEWEST modules (~15 vs 28) and has the largest, most cheap-phone
-  // -readable modules. Trade-off: ECC-L has little reader headroom, so the in-QR
-  // arcade masks self-limit their ink (see mask-arcade). For the lowest CHANGE
-  // PERCENTAGE / smallest changed area instead, switch to { version: 6, ecc: "M" }
-  // (41x41, denser) or { version: 5, ecc: "Q" }.
-  var VERSION = 2;
-  var ECC = "L";
+  // Default masking is the "snow" glitch overlay, which inks black modules over
+  // the code. Those overlaid cells are errors the reader must correct, so the
+  // symbol needs Reed-Solomon headroom to stay scannable in EVERY frame — hence
+  // ECC "H" (v3+H does not fit the payload, so v4 is the smallest ECC-H option).
+  // Snow only inks NON-reserved data modules (see mask-arcade), which keeps
+  // decoding at ~100%. The snow flicker also camouflages the per-second change,
+  // so it "looks like the code is just faultily rendering".
+  var VERSION = 4;
+  var ECC = "H";
   var MARGIN = 2;
   var DRAW_SIZE = IS_MOBILE ? 260 : 300;
   var DECODE_SCALE = 4;
   /** Candidate profiles for the boot-time flip measurement (tuning aid only). */
   var GRID_PROFILES = [
-    { version: 2, ecc: "L" },
-    { version: 6, ecc: "M" },
+    { version: 4, ecc: "H" },
     { version: 5, ecc: "Q" },
-    { version: 4, ecc: "H" }
+    { version: 6, ecc: "M" },
+    { version: 2, ecc: "L" }
   ];
   var STABILIZE_BUDGET_MS = IS_MOBILE ? 350 : 500;
   var PREFETCH_BUDGET_MS = IS_MOBILE ? 550 : 800;
@@ -97,10 +94,10 @@
     prefetch: null,
     renderMode: "none",
     paintEl: null,
-    epochIntervalSec: 5,
+    epochIntervalSec: 1,
     maskBalls: null,
     maskFx: null,
-    maskMethod: "crossfade",
+    maskMethod: "snow",
     pendingDiffs: null,
     forecastHorizon: 8,
     lastPlanSnap: null
@@ -142,7 +139,14 @@
     var rect = getQrContentRect();
     if (!rect) return null;
     var size = state.prevModules ? moduleSize(state.prevModules) : (17 + 4 * VERSION);
-    return { rect: rect, size: size, margin: MARGIN, ecc: ECC };
+    var mods = state.prevModules;
+    return {
+      rect: rect,
+      size: size,
+      margin: MARGIN,
+      ecc: ECC,
+      reserved: mods ? function (r, c) { return moduleReserved(mods, r, c); } : null
+    };
   }
 
   function now() {
