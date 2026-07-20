@@ -55,15 +55,30 @@ Debug pole `~CSS px` ukazuje odhad podle aktuální velikosti QR na obrazovce.
 - pod QR aktuální URL
 - **Interval epochy (s)** – jak často se QR přegeneruje (default 1 s)
 - **Maskovací koule** – volitelné (default vypnuté); 7 koulí **R G B C M Y K**, letí rovně a směr mění jen odrazem od okrajů obrazovky; QR změny se počítají několik kroků dopředu, překrytí je jen krátký průlet
-- debug: engine, decoder, epoch, raw Δ, flips, %, ~CSS px
+- při průniku: **RGB aditivně**, **CMYK substraktivně** (skupiny se navzájem nemíchají)
+- title stránky nese semver (`het68 QR vX.Y.Z`, viz `package.json`)
+- debug: version, engine, decoder, epoch, raw Δ, flips, %, ~CSS px
+
+## Deploy / self-contained `index.html`
+
+Hostitelé jako `qr.het68.cz`, které pro **každou cestu** vracejí stejné HTML (bez `/vendor/*`), potřebují **jeden soubor**:
+
+```bash
+npm run build   # → index.html se vším inline (QR lib, jsQR, CSS, app)
+```
+
+Po změně zdrojů vždy znovu `npm run build` a nasaď aktualizovaný `index.html` na origin.
+
+Modulární vývoj: `app.html` + `css/` + `js/` + `vendor/`.
 
 ## Lokální assety (CDN jen fallback)
 
 ```text
-index.html
+index.html          # self-contained (build výstup, production)
+app.html            # modulární shell pro lokální vývoj
+package.json        # semver
 css/styles.css
-js/codec.js
-js/app.js
+js/*.js
 vendor/qrcode.min.js
 vendor/jsQR.js
 vendor/qrcodejs.min.js
@@ -72,7 +87,8 @@ vendor/qrcodejs.min.js
 ## Spuštění
 
 ```bash
+npm run build
 python3 -m http.server 4173
 ```
 
-Otevřít `http://127.0.0.1:4173/`.
+Otevřít `http://127.0.0.1:4173/` (self-contained) nebo `/app.html` (modulární).

@@ -141,24 +141,18 @@ main {
   overflow: hidden;
 }
 
-.mask-ball {
+/* Two independent paint planes: RGB additive vs CMYK subtractive (no cross-mix). */
+.ball-canvas {
   position: absolute;
-  left: 0;
-  top: 0;
-  border-radius: 50%;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22);
-  opacity: 0.92;
-  will-change: transform;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
 }
 
-.mask-ball.color-K {
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35);
-}
-
-.mask-ball.is-cover {
-  opacity: 1;
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.45);
-}
+.ball-canvas-rgb { z-index: 1; }
+.ball-canvas-cmyk { z-index: 2; }
 
 #debug {
   position: fixed;
