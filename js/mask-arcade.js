@@ -19,7 +19,8 @@
 
   var STEP_MS = {
     snake: 110, tetris: 130, life: 160, snow: 120,
-    snow1: 100, snow2: 100, snow3: 110, snow4: 100, snow5: 90
+    snow1: 100, snow2: 100, snow3: 110, snow4: 100, snow5: 90,
+    snow6: 100, snow7: 90, snow8: 80
   };
   var INK = "#000000";
 
@@ -42,8 +43,9 @@
     this._loop = this.loop.bind(this);
   }
 
-  MaskArcade.MODES = ["snake", "tetris", "life", "snow", "snow1", "snow2", "snow3", "snow4", "snow5"];
-  MaskArcade.FLICKER = ["snow1", "snow2", "snow3", "snow4", "snow5"];
+  MaskArcade.MODES = ["snake", "tetris", "life", "snow",
+    "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8"];
+  MaskArcade.FLICKER = ["snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8"];
 
   // Safe overlaid-module fraction by ECC level: the reader must still correct the
   // overlaid cells as errors, so keep well under floor(EC/2). Roughly half the
@@ -329,11 +331,12 @@
       var n = Math.max(4, (this.size * 0.35) | 0);
       for (var i = 0; i < n; i++) flakes.push({ x: (Math.random() * this.size) | 0, y: Math.random() * this.size, v: 0.5 + Math.random() });
     }
-    return { variant: v, scanRow: 0, flakes: flakes };
+    return { variant: v, scanRow: 0, phase: 0, flakes: flakes };
   };
 
   MaskArcade.prototype.stepFlicker = function () {
     var st = this.state;
+    st.phase = (st.phase + 1) % 100000;
     if (st.variant === 5) st.scanRow = (st.scanRow + 1) % this.size;
     if (st.variant === 3) {
       for (var i = 0; i < st.flakes.length; i++) {
@@ -348,26 +351,54 @@
     return [(Math.random() * this.size) | 0, (Math.random() * this.size) | 0];
   };
 
+  /** A random NON-reserved data cell that is NOT in the changing set — i.e. a
+   *  module that will stay the SAME next iteration (a camouflage decoy). */
+  MaskArcade.prototype.randStable = function (changingSet) {
+    for (var t = 0; t < 30; t++) {
+      var r = (Math.random() * this.size) | 0;
+      var c = (Math.random() * this.size) | 0;
+      if (this.isReserved && this.isReserved(r, c)) continue;
+      if (changingSet && changingSet[r + "," + c]) continue;
+      return [r, c];
+    }
+    return this.randCell();
+  };
+
   /** Decoy cells (module [row,col]) for the current variant. */
-  MaskArcade.prototype.decoysFor = function (st, changing) {
+  MaskArcade.prototype.decoysFor = function (st, changing, changingSet) {
     var out = [];
-    var i, n;
+    var i, n, r, c;
+    var cap = this.perFrameCap;
     if (st.variant === 1) {
       return out; // changes only
     } else if (st.variant === 2) {
-      n = Math.ceil(this.perFrameCap * 0.6);
+      n = Math.ceil(cap * 0.6);
       for (i = 0; i < n; i++) out.push(this.randCell()); // scattered noise
     } else if (st.variant === 3) {
       for (i = 0; i < st.flakes.length; i++) out.push([Math.floor(st.flakes[i].y), st.flakes[i].x]); // falling snow
     } else if (st.variant === 4) {
-      // halo: neighbours of changing cells
-      for (i = 0; i < changing.length; i++) {
+      for (i = 0; i < changing.length; i++) { // halo around changes
         var dr = (Math.random() * 3 | 0) - 1, dc = (Math.random() * 3 | 0) - 1;
         out.push([changing[i][0] + dr, changing[i][1] + dc]);
       }
-      if (!changing.length) { for (i = 0; i < this.perFrameCap; i++) out.push(this.randCell()); }
+      if (!changing.length) { for (i = 0; i < cap; i++) out.push(this.randCell()); }
     } else if (st.variant === 5) {
-      for (var c = 0; c < this.size; c++) out.push([st.scanRow, c]); // scanline
+      for (c = 0; c < this.size; c++) out.push([st.scanRow, c]); // scanline
+    } else if (st.variant === 6) {
+      // camouflage: cells that will stay the SAME next iteration also blink, so
+      // a real change is indistinguishable from a decoy blink.
+      n = Math.max(cap, 12);
+      for (i = 0; i < n; i++) out.push(this.randStable(changingSet));
+    } else if (st.variant === 7) {
+      // interlace/scan glitch: cells on a moving set of rows (every 3rd row).
+      for (r = 0; r < this.size; r++) {
+        if ((r + st.phase) % 3 !== 0) continue;
+        for (c = 0; c < this.size; c++) if (Math.random() < 0.5) out.push([r, c]);
+      }
+    } else if (st.variant === 8) {
+      // static: dense TV-static dissolve across the whole data area.
+      n = cap * 3;
+      for (i = 0; i < n; i++) out.push(this.randStable(changingSet));
     }
     return out;
   };
@@ -377,6 +408,8 @@
     var st = this.state;
     var cap = this.perFrameCap;
     var changing = this.getChangingCells() || [];
+    var changingSet = {};
+    for (var ci = 0; ci < changing.length; ci++) changingSet[changing[ci][0] + "," + changing[ci][1]] = 1;
     var seen = {};
     var sel = [];
     function add(r, c) {
@@ -387,7 +420,13 @@
       sel.push([r, c]);
     }
     // Priority 1: a random blinking subset of the cells that will change.
-    var chgCap = st.variant === 1 ? cap : Math.ceil(cap * 0.65);
+    // v6 (camouflage) shows ~half changes / half stable so they look identical;
+    // v8 (static) lets the dense decoys dominate. Others favour the changes.
+    var chgCap;
+    if (st.variant === 1) chgCap = cap;
+    else if (st.variant === 6) chgCap = Math.floor(cap * 0.5);
+    else if (st.variant === 8) chgCap = Math.floor(cap * 0.4);
+    else chgCap = Math.ceil(cap * 0.65);
     var chg = changing.slice();
     for (var s = chg.length - 1; s > 0; s--) { var j = (Math.random() * (s + 1)) | 0; var t = chg[s]; chg[s] = chg[j]; chg[j] = t; }
     var cc = 0;
@@ -395,7 +434,7 @@
       if (Math.random() < 0.72) { add(chg[i][0], chg[i][1]); cc++; }
     }
     // Priority 2: variant decoys fill the remaining budget.
-    var decoys = this.decoysFor(st, changing);
+    var decoys = this.decoysFor(st, changing, changingSet);
     for (var d = decoys.length - 1; d > 0; d--) { var q = (Math.random() * (d + 1)) | 0; var u = decoys[d]; decoys[d] = decoys[q]; decoys[q] = u; }
     for (i = 0; i < decoys.length && sel.length < cap; i++) add(decoys[i][0], decoys[i][1]);
     // Fallback so it never looks dead before the first forecast arrives.

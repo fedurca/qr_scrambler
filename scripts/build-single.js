@@ -52,6 +52,9 @@ ${css}
         <option value="snow2">Změny + šum</option>
         <option value="snow4">Změny + roj</option>
         <option value="snow5">Změny + sken</option>
+        <option value="snow6">Kamufláž (změny + stejné)</option>
+        <option value="snow7">Interlace</option>
+        <option value="snow8">Statika</option>
         <option value="none">Žádné</option>
       </select>
     </label>

@@ -47,7 +47,7 @@ Hard floor: dvě různá QR data musí ležet v různých RS codeword basins; po
 
 ## Maskování změny (aby nebyla vidět)
 
-Výběr metody v UI (`Maskování`), default **Změny + sníh**. Všech 5 variant **předblikává právě ty moduly, které se v příští iteraci změní** (z forecastu), takže reálná sekundová změna splyne s probliknutím a vypadá to jako vadný render. Liší se přidanými „návnadami":
+Výběr metody v UI (`Maskování`), default **Změny + sníh**. Varianty **předblikávají právě ty moduly, které se v příští iteraci změní** (z forecastu), takže reálná sekundová změna splyne s probliknutím a vypadá to jako vadný render. Liší se přidanými „návnadami":
 
 | varianta | popis |
 | --- | --- |
@@ -56,6 +56,9 @@ Výběr metody v UI (`Maskování`), default **Změny + sníh**. Všech 5 varian
 | **Změny + sníh** (snow3, default) | + padající vločky |
 | **Změny + roj** (snow4) | + body v okolí měněných buněk |
 | **Změny + sken** (snow5) | + vodorovná „scan" linka putující kódem |
+| **Kamufláž** (snow6) | blikají zároveň buňky, které zůstanou **stejné** — reálná změna je nerozeznatelná od návnady |
+| **Interlace** (snow7) | prokládané řádky problikávají (efekt vadného řádkování) |
+| **Statika** (snow8) | hustá „TV statika" po celé datové ploše, změny v ní zaniknou |
 | **žádné** | bez maskování |
 
 Každý snímek se inkoustí jen **ne-rezervované datové moduly** (nikdy findery/timing/format) a nejvýš `perFrameCap` buněk (kalibrováno tak, že i kdyby všechny byly „chyby", v4+H dekóduje na ~100 %). Kód je proto čitelný v **každém** snímku. Dřívější metody (crossfade, koule, shimmer, měkká záplata, snake, tetris, game of life) zůstávají v kódu, ale nejsou v UI.
