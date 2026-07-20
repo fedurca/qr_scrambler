@@ -101,6 +101,7 @@
     forecastSteps: 6,
     lookupSteps: 6,
     noiseAmount: 0.5,
+    recSeconds: 5,
     futureDiffs: [],
     gentleMode: false,
     gentleCells: [],
@@ -109,10 +110,25 @@
     forecastHorizon: 8,
     lastPlanSnap: null,
     fpsSamples: [],
-    fpsLastPaint: 0
+    fpsLastPaint: 0,
+    recording: null,
+    _urlSyncReady: false
   };
 
   var FPS_WINDOW = 60;
+  var MASK_URL_OPTIONS = [
+    "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
+    "chg", "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin", "none",
+    "balls", "crossfade", "shimmer", "softpatch", "snake", "tetris", "life", "snow"
+  ];
+
+  function clampInt(v, lo, hi, fallback) {
+    var n = parseInt(v, 10);
+    if (!isFinite(n)) return fallback;
+    if (n < lo) return lo;
+    if (n > hi) return hi;
+    return n;
+  }
 
   function getLookupSteps() {
     var n = parseInt(state.lookupSteps, 10);
@@ -127,6 +143,338 @@
     if (a < 0) return 0;
     if (a > 1) return 1;
     return a;
+  }
+
+  function getRecSeconds() {
+    var n = parseInt(state.recSeconds, 10);
+    if (!isFinite(n) || n < 1) return 1;
+    if (n > 120) return 120;
+    return n;
+  }
+
+  /** Read settings from the page URL (?rate=&lookup=&noise=&mask=&rec=&debug=). */
+  function readUrlSettings() {
+    var q;
+    try { q = new URLSearchParams(location.search); } catch (e) { return {}; }
+    function first(keys) {
+      for (var i = 0; i < keys.length; i++) {
+        if (q.has(keys[i])) return q.get(keys[i]);
+      }
+      return null;
+    }
+    var out = {};
+    var rate = first(["rate", "cps", "changes"]);
+    if (rate != null) out.rate = clampInt(rate, 1, 1000, 1);
+    var lookup = first(["lookup", "forecast", "steps"]);
+    if (lookup != null) out.lookup = clampInt(lookup, 1, 30, 6);
+    var noise = first(["noise"]);
+    if (noise != null) out.noise = clampInt(noise, 0, 100, 50);
+    var mask = first(["mask", "method"]);
+    if (mask != null) {
+      mask = String(mask).trim().toLowerCase();
+      if (MASK_URL_OPTIONS.indexOf(mask) >= 0) out.mask = mask;
+    }
+    var rec = first(["rec", "duration", "record"]);
+    if (rec != null) out.rec = clampInt(rec, 1, 120, 5);
+    var dbg = first(["debug"]);
+    if (dbg != null) {
+      dbg = String(dbg).toLowerCase();
+      out.debug = dbg === "1" || dbg === "true" || dbg === "yes" || dbg === "open";
+    }
+    return out;
+  }
+
+  function buildSettingsQuery() {
+    var q = new URLSearchParams();
+    q.set("rate", String(getRate()));
+    q.set("lookup", String(getLookupSteps()));
+    q.set("noise", String(Math.round(getNoiseAmount() * 100)));
+    q.set("mask", state.maskMethod || "snow3");
+    q.set("rec", String(getRecSeconds()));
+    if (debugEl && debugEl.classList.contains("open")) q.set("debug", "1");
+    return q;
+  }
+
+  function settingsUrlString() {
+    try {
+      var u = new URL(location.href);
+      u.search = buildSettingsQuery().toString();
+      return u.toString();
+    } catch (e) {
+      return "?" + buildSettingsQuery().toString();
+    }
+  }
+
+  /** Push current controls into the address bar (shareable, no reload). */
+  function syncSettingsUrl() {
+    if (!state._urlSyncReady) return;
+    try {
+      var u = new URL(location.href);
+      var next = buildSettingsQuery().toString();
+      if (u.search.replace(/^\?/, "") === next) {
+        setMeta("d-settings", u.pathname + (next ? "?" + next : ""));
+        return;
+      }
+      u.search = next;
+      history.replaceState(null, "", u.toString());
+      setMeta("d-settings", u.pathname + (next ? "?" + next : ""));
+    } catch (e) {
+      // ignore (file:// / restricted)
+    }
+  }
+
+  function pickRecorderMime() {
+    var types = [
+      "video/webm;codecs=vp9",
+      "video/webm;codecs=vp8",
+      "video/webm",
+      "video/mp4;codecs=avc1",
+      "video/mp4"
+    ];
+    if (typeof MediaRecorder === "undefined") return "";
+    for (var i = 0; i < types.length; i++) {
+      try {
+        if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(types[i])) return types[i];
+      } catch (e) { /* ignore */ }
+    }
+    return "";
+  }
+
+  /** Draw QR modules into a canvas context (export path — independent of DOM paint mode). */
+  function drawModulesToCtx(ctx, modules, x, y, sidePx) {
+    var size = moduleSize(modules);
+    var n = size + MARGIN * 2;
+    var cell = sidePx / n;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(x, y, sidePx, sidePx);
+    ctx.fillStyle = "#000000";
+    for (var r = 0; r < size; r++) {
+      for (var c = 0; c < size; c++) {
+        if (!moduleGet(modules, r, c)) continue;
+        ctx.fillRect(
+          x + (c + MARGIN) * cell,
+          y + (r + MARGIN) * cell,
+          Math.ceil(cell),
+          Math.ceil(cell)
+        );
+      }
+    }
+  }
+
+  function drawOverlayCrop(ctx, el, area, scale) {
+    if (!el || el.width < 1 || el.height < 1) return;
+    if (el.style && el.style.display === "none") return;
+    var r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return;
+    var left = Math.max(area.left, r.left);
+    var top = Math.max(area.top, r.top);
+    var right = Math.min(area.right, r.right);
+    var bottom = Math.min(area.bottom, r.bottom);
+    if (right <= left || bottom <= top) return;
+    var sx = (left - r.left) * (el.width / r.width);
+    var sy = (top - r.top) * (el.height / r.height);
+    var sw = (right - left) * (el.width / r.width);
+    var sh = (bottom - top) * (el.height / r.height);
+    var dx = (left - area.left) * scale;
+    var dy = (top - area.top) * scale;
+    var dw = (right - left) * scale;
+    var dh = (bottom - top) * scale;
+    try {
+      ctx.drawImage(el, sx, sy, sw, sh, dx, dy, dw, dh);
+    } catch (e) { /* tainted / not ready */ }
+  }
+
+  /** Composite the on-screen QR host (+ mask overlays) into `canvas` for recording. */
+  function composeExportFrame(canvas) {
+    var area = qrHost.getBoundingClientRect();
+    if (!area.width || !area.height) return false;
+    var scale = Math.min(2, window.devicePixelRatio || 1);
+    var w = Math.max(2, Math.round(area.width * scale));
+    var h = Math.max(2, Math.round(area.height * scale));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    var ctx = canvas.getContext("2d");
+    if (!ctx) return false;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, w, h);
+
+    var paint = state.paintEl;
+    var pr = paint ? paint.getBoundingClientRect() : null;
+    if (state.prevModules && pr && pr.width > 0) {
+      var side = Math.min(pr.width, pr.height) * scale;
+      var dx = (pr.left - area.left) * scale;
+      var dy = (pr.top - area.top) * scale;
+      drawModulesToCtx(ctx, state.prevModules, dx, dy, side);
+    } else if (paint) {
+      var tag = (paint.tagName || "").toLowerCase();
+      if ((tag === "canvas" || tag === "img") && pr) {
+        try {
+          ctx.drawImage(
+            paint,
+            (pr.left - area.left) * scale,
+            (pr.top - area.top) * scale,
+            pr.width * scale,
+            pr.height * scale
+          );
+        } catch (e) { /* ignore */ }
+      }
+    }
+
+    drawOverlayCrop(ctx, document.getElementById("mask-arcade-canvas"), area, scale);
+    drawOverlayCrop(ctx, document.getElementById("mask-fx-canvas"), area, scale);
+    drawOverlayCrop(ctx, document.getElementById("ball-canvas-cmyk"), area, scale);
+    drawOverlayCrop(ctx, document.getElementById("ball-canvas-rgb"), area, scale);
+    return true;
+  }
+
+  function downloadBlob(blob, filename) {
+    var a = document.createElement("a");
+    var href = URL.createObjectURL(blob);
+    a.href = href;
+    a.download = filename;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () {
+      URL.revokeObjectURL(href);
+      if (a.parentNode) a.parentNode.removeChild(a);
+    }, 1500);
+  }
+
+  function stopVideoExport() {
+    var rec = state.recording;
+    if (!rec) return;
+    state.recording = null;
+    if (rec.raf) cancelAnimationFrame(rec.raf);
+    if (rec.timer) clearInterval(rec.timer);
+    try {
+      if (rec.media && rec.media.state !== "inactive") rec.media.stop();
+    } catch (e) { /* ignore */ }
+    var btn = document.getElementById("btn-record");
+    if (btn) {
+      btn.disabled = false;
+      btn.classList.remove("recording");
+      btn.textContent = "Export videa";
+    }
+    setMeta("d-rec", getRecSeconds() + " s");
+  }
+
+  function startVideoExport() {
+    if (state.recording) return;
+    if (typeof MediaRecorder === "undefined" || typeof HTMLCanvasElement === "undefined") {
+      fail(new Error("MediaRecorder není v tomto prohlížeči k dispozici"), "video");
+      return;
+    }
+    if (!state.prevModules && !state.paintEl) {
+      fail(new Error("QR ještě není vykreslené"), "video");
+      return;
+    }
+    var mime = pickRecorderMime();
+    var canvas = document.createElement("canvas");
+    if (!composeExportFrame(canvas)) {
+      fail(new Error("Nelze zachytit QR oblast"), "video");
+      return;
+    }
+    var fps = 30;
+    var stream;
+    try {
+      stream = canvas.captureStream(fps);
+    } catch (e) {
+      fail(e, "video.captureStream");
+      return;
+    }
+    var opts = mime ? { mimeType: mime, videoBitsPerSecond: 4e6 } : { videoBitsPerSecond: 4e6 };
+    var media;
+    try {
+      media = new MediaRecorder(stream, opts);
+    } catch (e1) {
+      try {
+        media = new MediaRecorder(stream);
+        mime = media.mimeType || "";
+      } catch (e2) {
+        fail(e2, "video.MediaRecorder");
+        return;
+      }
+    }
+
+    var chunks = [];
+    var durationMs = getRecSeconds() * 1000;
+    var startedAt = performance.now();
+    var btn = document.getElementById("btn-record");
+    if (btn) {
+      btn.disabled = true;
+      btn.classList.add("recording");
+    }
+
+    var session = {
+      canvas: canvas,
+      stream: stream,
+      media: media,
+      chunks: chunks,
+      raf: 0,
+      timer: 0,
+      mime: mime || media.mimeType || "video/webm"
+    };
+    state.recording = session;
+
+    media.ondataavailable = function (ev) {
+      if (ev.data && ev.data.size) chunks.push(ev.data);
+    };
+    media.onerror = function (ev) {
+      fail((ev && ev.error) || new Error("MediaRecorder error"), "video");
+      stopVideoExport();
+    };
+    media.onstop = function () {
+      var ext = (session.mime.indexOf("mp4") >= 0) ? "mp4" : "webm";
+      var stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      var name = "het68-qr-" + stamp + "-r" + getRate() + "-" + (state.maskMethod || "mask") + "." + ext;
+      var blob = new Blob(chunks, { type: session.mime || "video/webm" });
+      downloadBlob(blob, name);
+      log("Video export saved", { bytes: blob.size, mime: session.mime, seconds: getRecSeconds(), file: name });
+      // tracks stop
+      try {
+        stream.getTracks().forEach(function (t) { t.stop(); });
+      } catch (e) { /* ignore */ }
+      if (state.recording === session) state.recording = null;
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove("recording");
+        btn.textContent = "Export videa";
+      }
+      setMeta("d-rec", getRecSeconds() + " s");
+    };
+
+    function tickFrame() {
+      if (state.recording !== session) return;
+      composeExportFrame(canvas);
+      // Some browsers need requestFrame on the capture track for canvas streams.
+      var tracks = stream.getVideoTracks();
+      if (tracks[0] && typeof tracks[0].requestFrame === "function") {
+        try { tracks[0].requestFrame(); } catch (e) { /* ignore */ }
+      }
+      var left = Math.max(0, durationMs - (performance.now() - startedAt));
+      if (btn) btn.textContent = "Nahrávám " + Math.ceil(left / 1000) + "s";
+      setMeta("d-rec", "REC " + (left / 1000).toFixed(1) + "s");
+      if (left <= 0) {
+        try { if (media.state !== "inactive") media.stop(); } catch (e) { /* ignore */ }
+        return;
+      }
+      session.raf = requestAnimationFrame(tickFrame);
+    }
+
+    try {
+      media.start(200);
+    } catch (e) {
+      fail(e, "video.start");
+      stopVideoExport();
+      return;
+    }
+    log("Video export start", { seconds: getRecSeconds(), mime: session.mime, fps: fps });
+    session.raf = requestAnimationFrame(tickFrame);
   }
 
   /** Record QR paint timing → rolling min / avg / max FPS in debug. */
@@ -1602,6 +1950,7 @@
     if (state.maskFx) state.maskFx.setMethod(method);
     setMeta("d-mask", method);
     setMeta("d-lookup", String(getLookupSteps()));
+    syncSettingsUrl();
     if (rebuild) {
       cancelPrefetch();
       startPrefetch(currentSlot());
@@ -1626,6 +1975,24 @@
     var methodSelect = document.getElementById("mask-method");
     var lookupInput = document.getElementById("forecast-steps");
     var noiseInput = document.getElementById("noise-amount");
+    var recInput = document.getElementById("rec-seconds");
+    var recordBtn = document.getElementById("btn-record");
+
+    // Apply shareable URL settings before reading controls.
+    var fromUrl = readUrlSettings();
+    if (fromUrl.rate != null && rateInput) rateInput.value = String(fromUrl.rate);
+    if (fromUrl.lookup != null && lookupInput) lookupInput.value = String(fromUrl.lookup);
+    if (fromUrl.noise != null && noiseInput) noiseInput.value = String(fromUrl.noise);
+    if (fromUrl.rec != null && recInput) recInput.value = String(fromUrl.rec);
+    if (fromUrl.mask != null && methodSelect) {
+      var opt = methodSelect.querySelector('option[value="' + fromUrl.mask + '"]');
+      if (opt) methodSelect.value = fromUrl.mask;
+      else if (MASK_URL_OPTIONS.indexOf(fromUrl.mask) >= 0) {
+        // Legacy / hidden methods: still apply even if not listed in the select.
+        state.maskMethod = fromUrl.mask;
+      }
+    }
+    if (fromUrl.debug && debugEl) debugEl.classList.add("open");
 
     adjustLayout();
     window.addEventListener("resize", adjustLayout);
@@ -1659,6 +2026,7 @@
 
     if (rateInput) {
       state.changesPerSec = parseInt(rateInput.value, 10) || 1;
+      rateInput.value = String(getRate());
       setMeta("d-interval", getRate() + " /s");
       rateInput.addEventListener("change", function () {
         state.changesPerSec = parseInt(rateInput.value, 10) || 1;
@@ -1668,6 +2036,7 @@
         state.lastSlot = "";
         if (state.maskBalls) state.maskBalls.clearAssignments();
         log("Changes per second set", getRate());
+        syncSettingsUrl();
         restartTimer();
         tick();
       });
@@ -1686,6 +2055,7 @@
         cancelPrefetch();
         startPrefetch(currentSlot());
         log("Lookup steps set", getLookupSteps());
+        syncSettingsUrl();
         adjustLayout();
       });
     }
@@ -1707,21 +2077,54 @@
         noiseInput.value = String(p);
         setMeta("d-noise", p + "%");
         log("Noise amount set", p + "%");
+        syncSettingsUrl();
         adjustLayout();
       });
     }
 
+    if (recInput) {
+      state.recSeconds = clampInt(recInput.value, 1, 120, 5);
+      recInput.value = String(getRecSeconds());
+      setMeta("d-rec", getRecSeconds() + " s");
+      recInput.addEventListener("change", function () {
+        state.recSeconds = clampInt(recInput.value, 1, 120, 5);
+        recInput.value = String(getRecSeconds());
+        setMeta("d-rec", getRecSeconds() + " s");
+        log("Record length set", getRecSeconds() + "s");
+        syncSettingsUrl();
+        adjustLayout();
+      });
+    }
+
+    if (recordBtn) {
+      recordBtn.addEventListener("click", function () {
+        if (state.recording) return;
+        startVideoExport();
+      });
+    }
+
     if (methodSelect) {
-      state.maskMethod = methodSelect.value || "crossfade";
+      if (!state.maskMethod || state.maskMethod === "snow3") {
+        state.maskMethod = methodSelect.value || "snow3";
+      } else if (methodSelect.querySelector('option[value="' + state.maskMethod + '"]')) {
+        methodSelect.value = state.maskMethod;
+      }
       applyMaskMethod(state.maskMethod, false);
       methodSelect.addEventListener("change", function () {
-        var m = methodSelect.value || "crossfade";
+        var m = methodSelect.value || "snow3";
         log("Mask method", m);
         applyMaskMethod(m, true);
         adjustLayout();
       });
     } else {
       applyMaskMethod(state.maskMethod, false);
+    }
+
+    // Enable URL sync after initial apply (avoid clobbering typed deep-links mid-boot).
+    state._urlSyncReady = true;
+    syncSettingsUrl();
+    if (Object.keys(fromUrl).length) {
+      log("URL settings", fromUrl);
     }
   }
 
@@ -1777,6 +2180,7 @@
 
   document.getElementById("debug-toggle").addEventListener("click", function () {
     debugEl.classList.toggle("open");
+    syncSettingsUrl();
   });
 
   document.getElementById("btn-retry").addEventListener("click", function () {
@@ -1806,6 +2210,8 @@
       changesPerSec: getRate(),
       lookupSteps: getLookupSteps(),
       noiseAmount: Math.round(getNoiseAmount() * 100),
+      recSeconds: getRecSeconds(),
+      settingsUrl: settingsUrlString(),
       fps: (document.getElementById("d-fps") || {}).textContent || null,
       maskMethod: state.maskMethod,
       maskBalls: !!(state.maskBalls && state.maskBalls.enabled),
