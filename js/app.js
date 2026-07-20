@@ -101,6 +101,7 @@
     forecastSteps: 6,
     lookupSteps: 6,
     noiseAmount: 0.5,
+    changeAmount: 0.7,
     recSeconds: 5,
     futureDiffs: [],
     gentleMode: false,
@@ -145,6 +146,15 @@
     return a;
   }
 
+  /** Fraction (0..1) of next-iteration change cells randomly used in the mask. */
+  function getChangeAmount() {
+    var a = state.changeAmount;
+    if (!isFinite(a)) return 0.7;
+    if (a < 0) return 0;
+    if (a > 1) return 1;
+    return a;
+  }
+
   function getRecSeconds() {
     var n = parseInt(state.recSeconds, 10);
     if (!isFinite(n) || n < 1) return 1;
@@ -169,6 +179,8 @@
     if (lookup != null) out.lookup = clampInt(lookup, 1, 30, 6);
     var noise = first(["noise"]);
     if (noise != null) out.noise = clampInt(noise, 0, 100, 50);
+    var preview = first(["preview", "chgPct", "changepct", "next"]);
+    if (preview != null) out.preview = clampInt(preview, 0, 100, 70);
     var mask = first(["mask", "method"]);
     if (mask != null) {
       mask = String(mask).trim().toLowerCase();
@@ -189,6 +201,7 @@
     q.set("rate", String(getRate()));
     q.set("lookup", String(getLookupSteps()));
     q.set("noise", String(Math.round(getNoiseAmount() * 100)));
+    q.set("preview", String(Math.round(getChangeAmount() * 100)));
     q.set("mask", state.maskMethod || "snow3");
     q.set("rec", String(getRecSeconds()));
     if (debugEl && debugEl.classList.contains("open")) q.set("debug", "1");
@@ -1975,6 +1988,7 @@
     var methodSelect = document.getElementById("mask-method");
     var lookupInput = document.getElementById("forecast-steps");
     var noiseInput = document.getElementById("noise-amount");
+    var changePctInput = document.getElementById("change-pct");
     var recInput = document.getElementById("rec-seconds");
     var recordBtn = document.getElementById("btn-record");
 
@@ -1983,6 +1997,7 @@
     if (fromUrl.rate != null && rateInput) rateInput.value = String(fromUrl.rate);
     if (fromUrl.lookup != null && lookupInput) lookupInput.value = String(fromUrl.lookup);
     if (fromUrl.noise != null && noiseInput) noiseInput.value = String(fromUrl.noise);
+    if (fromUrl.preview != null && changePctInput) changePctInput.value = String(fromUrl.preview);
     if (fromUrl.rec != null && recInput) recInput.value = String(fromUrl.rec);
     if (fromUrl.mask != null && methodSelect) {
       var opt = methodSelect.querySelector('option[value="' + fromUrl.mask + '"]');
@@ -2020,6 +2035,7 @@
         getGentleCells: function () { return state.gentleCells || []; },
         getHorizon: function () { return getLookupSteps(); },
         getNoiseAmount: function () { return getNoiseAmount(); },
+        getChangeAmount: function () { return getChangeAmount(); },
         onLog: function (msg, detail) { log(msg, detail); }
       });
     }
@@ -2077,6 +2093,22 @@
         noiseInput.value = String(p);
         setMeta("d-noise", p + "%");
         log("Noise amount set", p + "%");
+        syncSettingsUrl();
+        adjustLayout();
+      });
+    }
+
+    if (changePctInput) {
+      var cp = clampInt(changePctInput.value, 0, 100, 70);
+      state.changeAmount = cp / 100;
+      changePctInput.value = String(cp);
+      setMeta("d-changepct", cp + "%");
+      changePctInput.addEventListener("change", function () {
+        var c = clampInt(changePctInput.value, 0, 100, 70);
+        state.changeAmount = c / 100;
+        changePctInput.value = String(c);
+        setMeta("d-changepct", c + "%");
+        log("Change preview % set", c + "%");
         syncSettingsUrl();
         adjustLayout();
       });
@@ -2210,6 +2242,7 @@
       changesPerSec: getRate(),
       lookupSteps: getLookupSteps(),
       noiseAmount: Math.round(getNoiseAmount() * 100),
+      changePct: Math.round(getChangeAmount() * 100),
       recSeconds: getRecSeconds(),
       settingsUrl: settingsUrlString(),
       fps: (document.getElementById("d-fps") || {}).textContent || null,

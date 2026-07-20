@@ -41,7 +41,8 @@
           getChangingCells: opts.getChangingCells || function () { return []; },
           getGentleCells: opts.getGentleCells || function () { return []; },
           getHorizon: opts.getHorizon || function () { return 1; },
-          getNoiseAmount: opts.getNoiseAmount || function () { return 0.5; }
+          getNoiseAmount: opts.getNoiseAmount || function () { return 0.5; },
+          getChangeAmount: opts.getChangeAmount || function () { return 0.7; }
         })
       : null;
   }
