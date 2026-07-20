@@ -78,6 +78,7 @@ Každý snímek se inkoustí jen **ne-rezervované datové moduly** (nikdy finde
 - **Dopředný lookup** (1–30) – počet iterací forecastu / chg / chgmin výhledu
 - **Šum %** (0–100) – množství maskovacích návnad (0 ≈ jen změny, 100 = plný čitelný cap)
 - **Změny %** (0–100) – náhodný podíl buněk z příští iterace (forecast), které se předblikávají; stále ≤ čitelný `perFrameCap`
+- **Cíl** – `Min. změny` (default, nejméně flipnutých modulů) nebo **Vyvážení B/W**: pad/mask/stabilize hledají kandidáty, které ve 3×3 oblastech drží poměr černá/bílá blízko 50/50, mezi oblastmi podobný a mezi snímky s **minimální poměrnou změnou** hustoty (pořád musí dekódovat)
 - **Maskování** – varianty předblikávání měněných modulů (default Změny + sníh)
 - **Záznam s** + **Export videa** – klientský záznam QR oblasti (včetně maskovacích overlayů) přes `MediaRecorder` → stažení `.webm`/`.mp4`; délka 1–120 s
 - title stránky nese semver (`het68 QR vX.Y.Z`, viz `package.json`)
@@ -93,11 +94,12 @@ Všechny ovládací prvky jdou sdílet v query stringu stránky (při změně se
 | `lookup` (alias `forecast`, `steps`) | dopředný lookup | 1–30 |
 | `noise` | šum % | 0–100 |
 | `preview` (alias `chgPct`, `next`) | % změn z příští iterace v náhledu | 0–100 |
+| `goal` (alias `objective`) | cíl generování | `min` / `balance` |
 | `mask` (alias `method`) | metoda maskování | `snow3`, `chg`, `chgmin`, … |
 | `rec` (alias `duration`, `record`) | délka videoexportu [s] | 1–120 |
 | `debug` | otevřít debug panel | `1` / `true` |
 
-Příklad: `/?rate=10&lookup=8&noise=40&preview=70&mask=snow2&rec=15`
+Příklad: `/?rate=10&lookup=8&noise=40&preview=70&goal=balance&mask=snow2&rec=15`
 
 ## Deploy / self-contained `index.html`
 
