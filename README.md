@@ -61,6 +61,7 @@ Výběr metody v UI (`Maskování`), default **Změny + sníh**. Varianty **pře
 | **Statika** (snow8) | hustší anti-pattern „statika" po datové ploše |
 | **Změny z N iterací** (chg) | předblikává **sjednocení změn z příštích N iterací** (N = Dopředný lookup) ve stylu padajícího sněhu |
 | **Nejjemnější** (chgmin) | z **N-krokového výhledu** vybere jen buňky, které se od aktuálního kódu **liší nejméně**, a ty jemně problikává |
+| **Plynulá změna B/W** (fade) | měněné moduly přecházejí **plynule ve stupních šedi** bílá↔černá (smoothstep); skutečný swap až po dojetí morphu. Délka: **Fade ms** / URL `fadeMs` (0 = auto ~75 % intervalu) |
 | **žádné** | bez maskování |
 
 `chgmin` počítá N-krokový výhled levně (jen canonical, bez stabilizace, throttlováno ~2 s; N z UI) a moduly řadí vzestupně podle toho, jak často se přes horizont liší od aktuálního kódu; bliká jen tu nejjemnější (přední) část, ≤ `perFrameCap` na snímek.
@@ -95,11 +96,14 @@ Všechny ovládací prvky jdou sdílet v query stringu stránky (při změně se
 | `noise` | šum % | 0–100 |
 | `preview` (alias `chgPct`, `next`) | % změn z příští iterace v náhledu | 0–100 |
 | `goal` (alias `objective`) | cíl generování | `min` / `balance` |
-| `mask` (alias `method`) | metoda maskování | `snow3`, `chg`, `chgmin`, … |
+| `mask` (alias `method`) | metoda maskování | `snow3`, `fade`, `chg`, `chgmin`, … |
+| `morph` / `fade` | zkratka pro plynulou B/W změnu | `1` nebo ms (`morph=400`) |
+| `fadeMs` (alias `morphMs`) | délka morphu [ms], `0` = auto | 0–2000 |
 | `rec` (alias `duration`, `record`) | délka videoexportu [s] | 1–120 |
 | `debug` | otevřít debug panel | `1` / `true` |
 
-Příklad: `/?rate=10&lookup=8&noise=40&preview=70&goal=balance&mask=snow2&rec=15`
+Příklad: `/?rate=10&lookup=8&noise=40&preview=70&goal=balance&mask=snow2&rec=15`  
+Plynulá změna: `/?mask=fade&fadeMs=400` nebo `/?morph=400`
 
 ## Deploy / self-contained `index.html`
 

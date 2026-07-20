@@ -6,9 +6,9 @@
  * what we hide the transition from.
  *
  * Methods (all operate on a transparent canvas positioned over the QR):
- *  - crossfade (default): the changed cells ramp opacity prev -> new over
- *    ~260 ms; the swap is deferred behind the overlay (a natural paint gate),
- *    so there is never an instant pop. Robust, no fragile motion timing.
+ *  - fade / morph / crossfade: changed cells morph grayscale white↔black
+ *    (smoothstep) over a configurable duration; the real swap is deferred
+ *    until the morph finishes so there is never an instant pop.
  *  - shimmer: a permanent, very low-contrast dither across the whole symbol,
  *    so a real per-interval change vanishes into the ambient micro-motion.
  *  - softpatch: a muted, soft-edged blob in the code color briefly covers each
@@ -34,6 +34,7 @@
     this.shimmerRaf = 0;
     this._shimmerLast = 0;
     this.getQrInfo = opts.getQrInfo || null;
+    this.getFadeMs = opts.getFadeMs || function () { return 260; };
     this.arcade = (typeof global.MaskArcade === "function")
       ? new global.MaskArcade({
           getQrInfo: this.getQrInfo,
@@ -47,12 +48,13 @@
       : null;
   }
 
-  MaskFx.OPTIONS = ["crossfade", "balls", "shimmer", "softpatch", "snake", "tetris", "life",
+  MaskFx.OPTIONS = ["fade", "morph", "crossfade", "balls", "shimmer", "softpatch", "snake", "tetris", "life",
     "snow", "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
     "chg", "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin", "none"];
   MaskFx.ARCADE = ["snake", "tetris", "life", "snow",
     "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
     "chg", "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin"];
+  MaskFx.MORPH = ["fade", "morph", "crossfade"];
 
   MaskFx.prototype.ensureCanvas = function () {
     if (this.canvas) return this.canvas;
@@ -98,7 +100,9 @@
   };
 
   MaskFx.prototype.setMethod = function (m) {
-    if (MaskFx.OPTIONS.indexOf(m) < 0) m = "crossfade";
+    if (MaskFx.OPTIONS.indexOf(m) < 0) m = "fade";
+    // Normalize aliases to the morph family.
+    if (m === "morph" || m === "crossfade") m = "fade";
     this.method = m;
     this.stopAnim();
     this.stopShimmer();
@@ -110,9 +114,13 @@
     }
   };
 
+  MaskFx.prototype.isMorph = function () {
+    return MaskFx.MORPH.indexOf(this.method) >= 0 || this.method === "fade";
+  };
+
   /** The caller should defer the real module swap only for methods that fade it in. */
   MaskFx.prototype.wantsDeferredSwap = function () {
-    return this.method === "crossfade";
+    return this.isMorph();
   };
 
   MaskFx.prototype.usesBalls = function () {
@@ -143,7 +151,7 @@
     var m = this.method;
     // Ambient methods (balls / shimmer / arcade) do not cover the changed cells
     // themselves — commit the swap immediately; the animation runs independently.
-    if (m !== "crossfade" && m !== "softpatch") {
+    if (!this.isMorph() && m !== "softpatch") {
       commit();
       return;
     }
@@ -154,30 +162,41 @@
     }
     if (!this.positionOver(rect)) { commit(); return; }
 
-    if (m === "crossfade") this.playCrossfade(rect, cells, size, margin, commit);
+    if (this.isMorph()) this.playMorph(rect, cells, size, margin, commit);
     else if (m === "softpatch") this.playSoftPatch(rect, cells, size, margin, commit);
     else commit();
   };
 
-  MaskFx.prototype.playCrossfade = function (rect, cells, size, margin, commit) {
+  /**
+   * Smooth grayscale morph of each changed module from its previous color to the
+   * new one (white→black or black→white). Underlying QR stays on the previous
+   * frame until the morph finishes, then commit() paints the settled modules.
+   */
+  MaskFx.prototype.playMorph = function (rect, cells, size, margin, commit) {
     var self = this;
     var ctx = this.ctx;
     this.stopAnim();
     var start = 0;
-    var dur = 260;
+    var dur = Math.max(40, Math.min(2000, (this.getFadeMs && this.getFadeMs()) || 260));
     var committed = false;
     function step(ts) {
       if (!start) start = ts;
       var k = Math.min(1, (ts - start) / dur);
+      // Smoothstep — avoids a linear "digital" gray ramp that draws the eye.
+      var e = k * k * (3 - 2 * k);
       self.clear();
-      ctx.globalAlpha = k;
+      ctx.globalAlpha = 1;
       for (var i = 0; i < cells.length; i++) {
         var b = self.cellBox(rect, size, margin, cells[i][0], cells[i][1]);
-        ctx.fillStyle = cells[i][2] ? "#000000" : "#ffffff";
-        // pad by 0.75px to avoid seams between adjacent changed cells
+        // cells[i][2] = new bit (1=black). Old bit is the opposite.
+        var toBlack = !!cells[i][2];
+        var fromG = toBlack ? 255 : 0;
+        var toG = toBlack ? 0 : 255;
+        var g = Math.round(fromG + (toG - fromG) * e);
+        ctx.fillStyle = "rgb(" + g + "," + g + "," + g + ")";
+        // pad slightly to avoid seams between adjacent changed cells
         ctx.fillRect(b.x - 0.5, b.y - 0.5, b.w + 1, b.h + 1);
       }
-      ctx.globalAlpha = 1;
       if (k < 1) {
         self.anim = requestAnimationFrame(step);
       } else {
@@ -187,6 +206,11 @@
       }
     }
     self.anim = requestAnimationFrame(step);
+  };
+
+  // Back-compat alias
+  MaskFx.prototype.playCrossfade = function (rect, cells, size, margin, commit) {
+    return this.playMorph(rect, cells, size, margin, commit);
   };
 
   MaskFx.prototype.playSoftPatch = function (rect, cells, size, margin, commit) {
