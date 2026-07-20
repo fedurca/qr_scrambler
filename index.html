@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="application-version" content="1.2.5" />
-  <title>het68 QR v1.2.5</title>
+  <meta name="application-version" content="1.2.6" />
+  <title>het68 QR v1.2.6</title>
   <style>
 :root {
   color-scheme: dark;
@@ -280,7 +280,7 @@ main {
     </header>
     <div class="body">
       <dl>
-        <dt>version</dt><dd id="d-version">1.2.5</dd>
+        <dt>version</dt><dd id="d-version">1.2.6</dd>
         <dt>engine</dt><dd id="d-engine">—</dd>
         <dt>source</dt><dd id="d-source">—</dd>
         <dt>decoder</dt><dd id="d-decoder">—</dd>
@@ -288,6 +288,8 @@ main {
         <dt>render</dt><dd id="d-render">—</dd>
         <dt>interval</dt><dd id="d-interval">1 s</dd>
         <dt>balls</dt><dd id="d-balls">off</dd>
+        <dt>forecast</dt><dd id="d-forecast">—</dd>
+        <dt>ball pos</dt><dd id="d-ballpos">—</dd>
         <dt>pad len</dt><dd id="d-pad">—</dd>
         <dt>epoch</dt><dd id="d-epoch">—</dd>
         <dt>raw Δ</dt><dd id="d-raw">—</dd>
@@ -10427,7 +10429,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
 });
   </script>
   <script>
-window.APP_VERSION="1.2.5";
+window.APP_VERSION="1.2.6";
 
   </script>
   <script>
@@ -10539,16 +10541,20 @@ window.APP_VERSION="1.2.5";
   var SPEED_JITTER = 50;
   var MAX_ACCEL = 1500; // px/s² — linear speed changes only
   /** Start intercept early so the ball is on-station before the flip. */
-  var COVER_LEAD_MS = 200;
+  var COVER_LEAD_MS = 280;
   /** Must be geometrically covering this long before the flip. */
-  var COVER_HOLD_MS = 80;
+  var COVER_HOLD_MS = 90;
   /** Leave almost immediately once the flip is done. */
-  var COVER_TRAIL_MS = 32;
-  var AIM_LOOKAHEAD_BOUNCES = 5;
+  var COVER_TRAIL_MS = 40;
+  /** Unfold images / bounce depth for route search. */
+  var AIM_LOOKAHEAD_BOUNCES = 8;
+  var MAX_PLAN_BOUNCES = 3;
   var MAX_TARGETS = 7;
   /** Cluster disc must fit inside the ball so a centered hit fully covers modules. */
   var MAX_TARGET_R = BALL_R - 8;
   var QR_CLEAR_PAD = 28;
+  /** Throttle for live plan/position debug dumps. */
+  var DEBUG_SNAP_MS = 220;
 
   function clamp(v, a, b) {
     return Math.max(a, Math.min(b, v));
@@ -10574,6 +10580,8 @@ window.APP_VERSION="1.2.5";
     this.dpr = 1;
     this.getQrRect = options && options.getQrRect ? options.getQrRect : function () { return null; };
     this.onLog = options && options.onLog ? options.onLog : function () {};
+    this.onPlanDebug = options && options.onPlanDebug ? options.onPlanDebug : function () {};
+    this._lastDebugMs = 0;
   }
 
   MaskBalls.prototype.ensureLayer = function () {
@@ -10671,8 +10679,13 @@ window.APP_VERSION="1.2.5";
       targetSpeed: speed,
       r: BALL_R,
       pendingAngle: null,
+      angleQueue: [],
+      postSpeed: null,
+      postSpeedQueue: [],
       queue: [],
-      covering: false
+      covering: false,
+      evacuating: false,
+      needEvacuate: false
     };
     this.balls.push(ball);
     return ball;
@@ -10725,17 +10738,95 @@ window.APP_VERSION="1.2.5";
         var d = hypot(imgX - bx, imgY - by);
         if (d <= 1) continue;
         var raw = Math.abs(d - travelDist);
-        var score = raw + (Math.abs(nx) + Math.abs(ny)) * 3;
+        var bounces = Math.abs(nx) + Math.abs(ny);
+        var score = raw + bounces * 2.2;
         if (score < bestScore) {
           bestScore = score;
-          best = { ang: Math.atan2(imgY - by, imgX - bx), dist: d, raw: raw };
+          best = {
+            ang: Math.atan2(imgY - by, imgX - bx),
+            dist: d,
+            raw: raw,
+            nx: nx,
+            ny: ny,
+            bounces: bounces
+          };
         }
       }
     }
     if (!best) return null;
-    var slack = Math.max(BALL_R * 1.2, travelDist * 0.22, 50);
+    var slack = Math.max(BALL_R * 1.6, travelDist * 0.28, 70);
     if (best.raw > slack) return null;
     return best;
+  };
+
+  /** Exact image aim: choose speed so distance/image matches tAfter (no discrete travel guess). */
+  MaskBalls.prototype.bestImageAim = function (bx, by, target, tAfter, ball) {
+    if (tAfter < 0.02) return null;
+    var bounds = this.playBounds(ball);
+    var best = null;
+    var bestScore = Infinity;
+    for (var nx = -AIM_LOOKAHEAD_BOUNCES; nx <= AIM_LOOKAHEAD_BOUNCES; nx++) {
+      for (var ny = -AIM_LOOKAHEAD_BOUNCES; ny <= AIM_LOOKAHEAD_BOUNCES; ny++) {
+        var imgX = target.x;
+        var imgY = target.y;
+        if (nx !== 0 || ny !== 0) {
+          var img = this.unfoldPoint(target.x, target.y, nx, ny, bounds);
+          imgX = img.x;
+          imgY = img.y;
+        }
+        var d = hypot(imgX - bx, imgY - by);
+        if (d <= 1) continue;
+        var need = d / tAfter;
+        if (need < MIN_SPEED * 0.85 || need > MAX_SPEED * 1.12) continue;
+        var speed = clamp(need, MIN_SPEED, MAX_SPEED);
+        var err = Math.abs(d - speed * tAfter);
+        var bounces = Math.abs(nx) + Math.abs(ny);
+        var score = err + bounces * 4 + Math.abs(need - speed) * 0.05;
+        if (score < bestScore) {
+          bestScore = score;
+          best = {
+            ang: Math.atan2(imgY - by, imgX - bx),
+            dist: d,
+            speed: speed,
+            raw: err,
+            nx: nx,
+            ny: ny,
+            bounces: bounces
+          };
+        }
+      }
+    }
+    return best;
+  };
+
+  /**
+   * Time (s) to travel `dist` along a ray while accelerating from v0 toward vGoal.
+   * Direction unchanged; only linear speed (MAX_ACCEL).
+   */
+  MaskBalls.prototype.timeToTravelAccel = function (dist, v0, vGoal) {
+    if (dist <= 0) return 0;
+    v0 = clamp(v0, MIN_SPEED, MAX_SPEED);
+    vGoal = clamp(vGoal, MIN_SPEED, MAX_SPEED);
+    var a = MAX_ACCEL;
+    if (Math.abs(vGoal - v0) < 1e-3) return dist / Math.max(v0, 1);
+    if (vGoal > v0) {
+      var tAcc = (vGoal - v0) / a;
+      var dAcc = v0 * tAcc + 0.5 * a * tAcc * tAcc;
+      if (dAcc >= dist) {
+        // Solve 0.5 a t^2 + v0 t - dist = 0
+        var disc = v0 * v0 + 2 * a * dist;
+        return (-v0 + Math.sqrt(disc)) / a;
+      }
+      return tAcc + (dist - dAcc) / vGoal;
+    }
+    var tDec = (v0 - vGoal) / a;
+    var dDec = v0 * tDec - 0.5 * a * tDec * tDec;
+    if (dDec >= dist) {
+      disc = v0 * v0 - 2 * a * dist;
+      if (disc < 0) return dist / Math.max(v0, 1);
+      return (v0 - Math.sqrt(disc)) / a;
+    }
+    return tDec + (dist - dDec) / Math.max(vGoal, 1);
   };
 
   /**
@@ -10930,18 +11021,60 @@ window.APP_VERSION="1.2.5";
         coverMs: coverMs,
         leadMs: leadMs,
         trailMs: trailMs,
+        diffCount: ev.diffs.length,
+        diffs: ev.diffs.slice(0, 40),
         targets: targets
       });
     }
     this.events = built;
     this.assignAndAim(now);
-    this.onLog("Mask forecast", {
+    this.onLog("Mask forecast", this.forecastDebugPayload(built, now));
+    this.emitPlanDebug(now, true);
+    this.startLoop();
+  };
+
+  MaskBalls.prototype.forecastDebugPayload = function (built, now) {
+    var self = this;
+    return {
       events: built.length,
       targets: built.reduce(function (n, e) { return n + e.targets.length; }, 0),
-      coverMs: Math.round(coverMs),
-      balls: this.balls.length
-    });
-    this.startLoop();
+      balls: this.balls.length,
+      horizon: built.map(function (ev) {
+        return {
+          slot: ev.slot,
+          inMs: Math.round(ev.changeAtMs - now),
+          diffs: ev.diffCount != null ? ev.diffCount : ev.targets.reduce(function (n, t) {
+            return n + (t.count || 0);
+          }, 0),
+          cells: (ev.diffs || []).slice(0, 16).map(function (d) {
+            return d[0] + "," + d[1];
+          }),
+          targets: ev.targets.map(function (t) {
+            var cells = (t.cells || []).map(function (c) {
+              return c.row + "," + c.col;
+            });
+            return {
+              x: Math.round(t.x),
+              y: Math.round(t.y),
+              r: Math.round(t.r),
+              n: t.count,
+              ball: t.assigned || null,
+              cells: cells.slice(0, 12)
+            };
+          })
+        };
+      }),
+      ballsNow: self.balls.map(function (b) {
+        return {
+          id: b.colorId,
+          x: Math.round(b.x),
+          y: Math.round(b.y),
+          sp: Math.round(b.speed),
+          ang: Math.round(Math.atan2(b.vy, b.vx) * 180 / Math.PI),
+          q: (b.queue || []).length
+        };
+      })
+    };
   };
 
   MaskBalls.prototype.planForDiffs = function (moduleDiffs, meta) {
@@ -10958,6 +11091,9 @@ window.APP_VERSION="1.2.5";
     for (var i = 0; i < this.balls.length; i++) {
       this.balls[i].queue = [];
       this.balls[i].pendingAngle = null;
+      this.balls[i].angleQueue = [];
+      this.balls[i].postSpeed = null;
+      this.balls[i].postSpeedQueue = [];
       this.balls[i].covering = false;
       this.balls[i].targetSpeed = clamp(this.balls[i].speed, MIN_SPEED, MAX_SPEED);
     }
@@ -11119,52 +11255,87 @@ window.APP_VERSION="1.2.5";
     };
   };
 
-  /** True if current heading (with specular bounces) passes near target around tHit. */
-  MaskBalls.prototype.trajectoryCovers = function (ball, target, changeAtMs, now) {
-    var tHit = (changeAtMs - now) / 1000;
-    if (tHit < 0.02 || tHit > 14) return false;
-    var sim = { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy, r: ball.r, speed: ball.speed };
+  /**
+   * Simulate position after tSec with constant speed + specular bounces,
+   * applying pendingAngle / angleQueue at successive walls (same as integrate).
+   */
+  MaskBalls.prototype.predictAt = function (ball, tSec, optSpeed, optPending, optQueue) {
+    var speed = optSpeed != null ? optSpeed : (hypot(ball.vx, ball.vy) || ball.speed);
+    var ang0 = Math.atan2(ball.vy, ball.vx);
+    var sim = {
+      x: ball.x,
+      y: ball.y,
+      vx: Math.cos(ang0) * speed,
+      vy: Math.sin(ang0) * speed,
+      r: BALL_R,
+      speed: speed,
+      pendingAngle: optPending != null ? optPending : ball.pendingAngle,
+      angleQueue: (optQueue || ball.angleQueue || []).slice()
+    };
     var elapsed = 0;
     var steps = 0;
-    var tol = Math.max(6, BALL_R - target.r);
-    while (elapsed < tHit + 0.05 && steps < 48) {
-      var remain = tHit - elapsed;
-      if (remain < 0) break;
+    while (elapsed < tSec - 1e-6 && steps < 64) {
+      var remain = tSec - elapsed;
       var nb = this.nextBounce(sim, remain + 1e-4);
-      var dt = nb ? Math.min(nb.t, remain) : remain;
-      var x1 = sim.x + sim.vx * dt;
-      var y1 = sim.y + sim.vy * dt;
-      var dx = x1 - sim.x;
-      var dy = y1 - sim.y;
-      var len2 = dx * dx + dy * dy;
-      if (len2 >= 1e-8) {
-        var u = clamp(((target.x - sim.x) * dx + (target.y - sim.y) * dy) / len2, 0, 1);
-        var cx = sim.x + u * dx;
-        var cy = sim.y + u * dy;
-        var tSeg = elapsed + u * dt;
-        if (hypot(cx - target.x, cy - target.y) <= tol && Math.abs(tSeg - tHit) <= 0.08) {
-          return true;
-        }
-      }
-      if (!nb || dt < nb.t - 1e-6) {
-        // End of segment at tHit
-        if (hypot(x1 - target.x, y1 - target.y) <= tol) return true;
+      if (!nb || nb.t > remain) {
+        sim.x += sim.vx * remain;
+        sim.y += sim.vy * remain;
+        elapsed = tSec;
         break;
       }
       sim.x = nb.x;
       sim.y = nb.y;
       elapsed += nb.t;
-      if (nb.wall.indexOf("L") >= 0 || nb.wall.indexOf("R") >= 0) sim.vx = -sim.vx;
-      if (nb.wall.indexOf("T") >= 0 || nb.wall.indexOf("B") >= 0) sim.vy = -sim.vy;
+      if (sim.pendingAngle != null) {
+        var ang = sim.pendingAngle;
+        sim.pendingAngle = null;
+        if (sim.angleQueue && sim.angleQueue.length) {
+          sim.pendingAngle = sim.angleQueue.shift();
+        }
+        sim.vx = Math.cos(ang) * sim.speed;
+        sim.vy = Math.sin(ang) * sim.speed;
+      } else {
+        if (nb.wall.indexOf("L") >= 0 || nb.wall.indexOf("R") >= 0) sim.vx = -sim.vx;
+        if (nb.wall.indexOf("T") >= 0 || nb.wall.indexOf("B") >= 0) sim.vy = -sim.vy;
+      }
       steps++;
+    }
+    return { x: sim.x, y: sim.y, speed: sim.speed, steps: steps };
+  };
+
+  /** True if current heading (with specular bounces / images) passes near target around tHit. */
+  MaskBalls.prototype.trajectoryCovers = function (ball, target, changeAtMs, now) {
+    var tHit = (changeAtMs - now) / 1000;
+    if (tHit < 0.02 || tHit > 20) return false;
+    var tol = Math.max(6, BALL_R - target.r);
+    var pred = this.predictAt(ball, tHit);
+    if (hypot(pred.x - target.x, pred.y - target.y) <= tol) return true;
+
+    // Method of images: current heading toward some unfold of the target
+    var sp = hypot(ball.vx, ball.vy) || ball.speed;
+    if (sp < 1) return false;
+    var ux = ball.vx / sp;
+    var uy = ball.vy / sp;
+    var bounds = this.playBounds(ball);
+    for (var nx = -AIM_LOOKAHEAD_BOUNCES; nx <= AIM_LOOKAHEAD_BOUNCES; nx++) {
+      for (var ny = -AIM_LOOKAHEAD_BOUNCES; ny <= AIM_LOOKAHEAD_BOUNCES; ny++) {
+        var img = (nx === 0 && ny === 0)
+          ? { x: target.x, y: target.y }
+          : this.unfoldPoint(target.x, target.y, nx, ny, bounds);
+        var toX = img.x - ball.x;
+        var toY = img.y - ball.y;
+        var along = toX * ux + toY * uy;
+        var perp = hypot(toX - along * ux, toY - along * uy);
+        if (along > 4 && perp <= tol && Math.abs(along / sp - tHit) <= 0.12) return true;
+      }
     }
     return false;
   };
 
   /**
    * Plan intercept using ONLY:
-   * - linear targetSpeed along current heading (if on-track), and/or
-   * - pendingAngle at next bounce + linear speed (pre/post bounce)
+   * - linear targetSpeed along current heading (incl. specular images), and/or
+   * - pendingAngle (+ optional angleQueue) at wall bounces + linear speed
    * Speeding up reaches the wall sooner (same ray → earlier bounce).
    */
   MaskBalls.prototype.planIntercept = function (ball, target, changeAtMs, now) {
@@ -11174,76 +11345,184 @@ window.APP_VERSION="1.2.5";
     var sp = hypot(ball.vx, ball.vy) || ball.speed;
     var ux = ball.vx / sp;
     var uy = ball.vy / sp;
-    var toX = target.x - ball.x;
-    var toY = target.y - ball.y;
-    var along = toX * ux + toY * uy;
-    var perp = hypot(toX - along * ux, toY - along * uy);
     var tol = Math.max(4, BALL_R - target.r);
+    var candidates = [];
+    var bounds = this.playBounds(ball);
 
-    // On current ray: only speed change needed
-    if (along > 6 && perp <= tol) {
-      var needSpeed = along / tHit;
-      if (needSpeed >= MIN_SPEED * 0.7 && needSpeed <= MAX_SPEED * 1.15) {
-        return {
+    // A) Speed-only along current heading toward any unfold image (multi-bounce specular)
+    for (var nx = -AIM_LOOKAHEAD_BOUNCES; nx <= AIM_LOOKAHEAD_BOUNCES; nx++) {
+      for (var ny = -AIM_LOOKAHEAD_BOUNCES; ny <= AIM_LOOKAHEAD_BOUNCES; ny++) {
+        var img = (nx === 0 && ny === 0)
+          ? { x: target.x, y: target.y }
+          : this.unfoldPoint(target.x, target.y, nx, ny, bounds);
+        var toX = img.x - ball.x;
+        var toY = img.y - ball.y;
+        var along = toX * ux + toY * uy;
+        var perp = hypot(toX - along * ux, toY - along * uy);
+        if (along <= 6 || perp > tol) continue;
+        var needSpeed = along / tHit;
+        if (needSpeed < MIN_SPEED * 0.65 || needSpeed > MAX_SPEED * 1.2) continue;
+        var s = clamp(needSpeed, MIN_SPEED, MAX_SPEED);
+        var tActual = this.timeToTravelAccel(along, sp, s);
+        var timingErr = Math.abs(tActual - tHit);
+        if (timingErr > 0.18) continue;
+        candidates.push({
           pendingAngle: null,
-          targetSpeed: clamp(needSpeed, MIN_SPEED, MAX_SPEED),
-          score: perp + Math.abs(needSpeed - sp) * 0.04
-        };
+          angleQueue: [],
+          targetSpeed: s,
+          postSpeed: null,
+          score: perp + timingErr * 80 + Math.abs(s - sp) * 0.03 + (Math.abs(nx) + Math.abs(ny)) * 3,
+          kind: "speed-image",
+          bounces: Math.abs(nx) + Math.abs(ny)
+        });
       }
     }
 
-    // Probe next wall hit along current ray (position independent of speed)
+    // B) Redirect at next wall, then image-aim (encodes further specular bounces)
     var probe = {
       x: ball.x,
       y: ball.y,
       vx: ux * BASE_SPEED,
       vy: uy * BASE_SPEED,
-      r: ball.r,
+      r: BALL_R,
       speed: BASE_SPEED
     };
-    var nb = this.nextBounce(probe, 30);
-    if (!nb) return null;
-    var wallDist = nb.t * BASE_SPEED;
-    if (wallDist < 1) return null;
-
-    var candidates = [];
-    var preSpeeds = [MIN_SPEED, sp, (MIN_SPEED + MAX_SPEED) / 2, MAX_SPEED * 0.75, MAX_SPEED];
-    var postSpeeds = [MIN_SPEED, BASE_SPEED, (MIN_SPEED + MAX_SPEED) / 2, MAX_SPEED];
-
-    for (var pi = 0; pi < preSpeeds.length; pi++) {
-      var sPre = clamp(preSpeeds[pi], MIN_SPEED, MAX_SPEED);
-      var tB = wallDist / sPre;
-      if (tB >= tHit - 0.05) continue;
-      var tAfter = tHit - tB;
-      for (var qi = 0; qi < postSpeeds.length; qi++) {
-        var sPost = clamp(postSpeeds[qi], MIN_SPEED, MAX_SPEED);
-        var travel = sPost * tAfter;
-        var aim = this.aimAngleFromBounce(nb.x, nb.y, target, travel, ball);
+    var nb = this.nextBounce(probe, 40);
+    if (nb) {
+      var wallDist = nb.t * BASE_SPEED;
+      var preSpeeds = [
+        MIN_SPEED,
+        sp,
+        (MIN_SPEED + MAX_SPEED) * 0.35,
+        (MIN_SPEED + MAX_SPEED) * 0.55,
+        MAX_SPEED * 0.72,
+        MAX_SPEED * 0.88,
+        MAX_SPEED
+      ];
+      for (var pi = 0; pi < preSpeeds.length; pi++) {
+        var sPre = clamp(preSpeeds[pi], MIN_SPEED, MAX_SPEED);
+        var tB = this.timeToTravelAccel(wallDist, sp, sPre);
+        if (tB >= tHit - 0.04) continue;
+        var tAfter = tHit - tB;
+        var aim = this.bestImageAim(nb.x, nb.y, target, tAfter, ball);
+        if (!aim) {
+          // Fallback discrete travel match
+          var sPostTry = clamp(hypot(target.x - nb.x, target.y - nb.y) / tAfter, MIN_SPEED, MAX_SPEED);
+          aim = this.aimAngleFromBounce(nb.x, nb.y, target, sPostTry * tAfter, ball);
+          if (aim) aim.speed = sPostTry;
+        }
         if (!aim) continue;
+        var ghost = {
+          x: nb.x,
+          y: nb.y,
+          vx: Math.cos(aim.ang) * aim.speed,
+          vy: Math.sin(aim.ang) * aim.speed,
+          r: BALL_R,
+          speed: aim.speed
+        };
+        var folded = this.predictAt(ghost, tAfter, aim.speed, null, []);
+        var miss = hypot(folded.x - target.x, folded.y - target.y);
         candidates.push({
           pendingAngle: aim.ang,
-          // Use pre-bounce speed until wall; after bounce integrate keeps ball.speed
-          // so set targetSpeed to sPost once we bounce (applied via pending retarget)
+          angleQueue: [],
           targetSpeed: sPre,
-          postSpeed: sPost,
-          score: aim.raw + tB * 25 + Math.abs(sPre - sp) * 0.02
+          postSpeed: aim.speed,
+          postSpeedQueue: [],
+          score: miss + tB * 18 + (aim.bounces || 0) * 3 + Math.abs(sPre - sp) * 0.02,
+          kind: "bounce1-image",
+          bounces: 1 + (aim.bounces || 0),
+          miss: miss
         });
       }
     }
 
-    if (!candidates.length) {
-      // Rush to wall, aim toward target; timing may be late but still covers soon
+    // C) Two redirects — only when 1-bounce / speed-only leave a large miss
+    var bestSoFar = candidates.length
+      ? candidates.reduce(function (a, c) { return c.score < a.score ? c : a; }, candidates[0])
+      : null;
+    var needDeep = !bestSoFar || (bestSoFar.miss != null && bestSoFar.miss > tol + 10) || bestSoFar.score > 200;
+    if (nb && MAX_PLAN_BOUNCES >= 2 && needDeep && tHit > 0.28) {
+      var midSpeeds = [BASE_SPEED, (MIN_SPEED + MAX_SPEED) / 2, MAX_SPEED];
+      var wallDist2 = nb.t * BASE_SPEED;
+      for (var psi = 0; psi < midSpeeds.length; psi++) {
+        var sPre2 = midSpeeds[psi];
+        var tB1 = this.timeToTravelAccel(wallDist2, sp, sPre2);
+        if (tB1 >= tHit - 0.1) continue;
+        for (var msi = 0; msi < midSpeeds.length; msi++) {
+          var sMid = midSpeeds[msi];
+          for (nx = -2; nx <= 2; nx++) {
+            for (ny = -2; ny <= 2; ny++) {
+              if (nx === 0 && ny === 0) continue;
+              img = this.unfoldPoint(target.x, target.y, nx, ny, bounds);
+              var ang1 = Math.atan2(img.y - nb.y, img.x - nb.x);
+              var midProbe = {
+                x: nb.x,
+                y: nb.y,
+                vx: Math.cos(ang1) * sMid,
+                vy: Math.sin(ang1) * sMid,
+                r: BALL_R,
+                speed: sMid
+              };
+              var remainAfter = tHit - tB1;
+              var nb2 = this.nextBounce(midProbe, remainAfter - 0.05);
+              if (!nb2 || nb2.t < 0.04) continue;
+              var tB2 = nb2.t;
+              if (tB1 + tB2 >= tHit - 0.04) continue;
+              var tAfter2 = tHit - tB1 - tB2;
+              var aim2 = this.bestImageAim(nb2.x, nb2.y, target, tAfter2, ball);
+              if (!aim2) continue;
+              var g2 = {
+                x: nb2.x,
+                y: nb2.y,
+                vx: Math.cos(aim2.ang) * aim2.speed,
+                vy: Math.sin(aim2.ang) * aim2.speed,
+                r: BALL_R,
+                speed: aim2.speed
+              };
+              var fold2 = this.predictAt(g2, tAfter2, aim2.speed, null, []);
+              var miss2 = hypot(fold2.x - target.x, fold2.y - target.y);
+              if (miss2 > tol + 18) continue;
+              candidates.push({
+                pendingAngle: ang1,
+                angleQueue: [aim2.ang],
+                targetSpeed: sPre2,
+                postSpeed: sMid,
+                postSpeedQueue: [aim2.speed],
+                score: miss2 + (tB1 + tB2) * 12 + 40 + (Math.abs(nx) + Math.abs(ny)) * 2,
+                kind: "bounce2",
+                bounces: 2 + (aim2.bounces || 0),
+                miss: miss2
+              });
+            }
+          }
+        }
+      }
+    }
+
+    if (!candidates.length && nb) {
+      // Rush to wall, aim toward nearest image; late cover better than none
+      var late = this.bestImageAim(nb.x, nb.y, target, Math.max(0.12, tHit * 0.45), ball);
       var direct = hypot(target.x - nb.x, target.y - nb.y);
       candidates.push({
-        pendingAngle: Math.atan2(target.y - nb.y, target.x - nb.x),
+        pendingAngle: late ? late.ang : Math.atan2(target.y - nb.y, target.x - nb.x),
+        angleQueue: [],
         targetSpeed: MAX_SPEED,
-        postSpeed: clamp(direct / Math.max(0.08, tHit * 0.5), MIN_SPEED, MAX_SPEED),
-        score: 1200 + direct * 0.15
+        postSpeed: late ? late.speed : clamp(direct / Math.max(0.08, tHit * 0.45), MIN_SPEED, MAX_SPEED),
+        score: 1400 + direct * 0.12,
+        kind: "late",
+        bounces: late ? 1 + late.bounces : 1
       });
     }
 
+    if (!candidates.length) return null;
     candidates.sort(function (a, b) { return a.score - b.score; });
-    return candidates[0];
+    var best = candidates[0];
+    // Verify / refine miss with full predict when possible
+    if (best.pendingAngle == null) {
+      var check = this.predictAt(ball, tHit, best.targetSpeed, null, []);
+      best.miss = hypot(check.x - target.x, check.y - target.y);
+    }
+    return best;
   };
 
   /** Per-frame refine: intercept only when due → brief cover → evacuate QR. */
@@ -11317,9 +11596,27 @@ window.APP_VERSION="1.2.5";
       return;
     }
     ball.evacuating = false;
+    this.applyPlan(ball, plan);
+  };
+
+  MaskBalls.prototype.applyPlan = function (ball, plan) {
+    if (!plan) return;
     ball.targetSpeed = plan.targetSpeed;
-    if (plan.postSpeed != null) ball.postSpeed = plan.postSpeed;
-    if (plan.pendingAngle != null) ball.pendingAngle = plan.pendingAngle;
+    ball.postSpeed = plan.postSpeed != null ? plan.postSpeed : null;
+    ball.postSpeedQueue = (plan.postSpeedQueue || []).slice();
+    if (plan.pendingAngle != null) {
+      ball.pendingAngle = plan.pendingAngle;
+      ball.angleQueue = (plan.angleQueue || []).slice();
+    } else if (plan.kind === "speed-image" || plan.kind === "on-track") {
+      // Pure speed plan: clear stale redirects so specular path stays valid
+      ball.pendingAngle = null;
+      ball.angleQueue = [];
+      ball.postSpeed = null;
+      ball.postSpeedQueue = [];
+    }
+    ball.planKind = plan.kind || null;
+    ball.planMiss = plan.miss != null ? plan.miss : null;
+    ball.planBounces = plan.bounces != null ? plan.bounces : null;
   };
 
   MaskBalls.prototype.ballFreeFor = function (ball, changeAtMs, leadMs, trailMs) {
@@ -11339,11 +11636,21 @@ window.APP_VERSION="1.2.5";
     }
 
     var planFor = {};
+    var assignments = [];
 
-    for (var ei = 0; ei < this.events.length; ei++) {
-      var ev = this.events[ei];
-      for (var ti = 0; ti < ev.targets.length; ti++) {
-        var target = ev.targets[ti];
+    // Prefer sooner slots first so near-term flips get the best balls
+    var events = this.events.slice().sort(function (a, b) {
+      return a.changeAtMs - b.changeAtMs;
+    });
+
+    for (var ei = 0; ei < events.length; ei++) {
+      var ev = events[ei];
+      // Larger clusters first within a slot
+      var targets = ev.targets.slice().sort(function (a, b) {
+        return (b.count || 0) - (a.count || 0);
+      });
+      for (var ti = 0; ti < targets.length; ti++) {
+        var target = targets[ti];
         var chosen = null;
         var chosenPlan = null;
         var chosenScore = Infinity;
@@ -11355,18 +11662,22 @@ window.APP_VERSION="1.2.5";
           var plan = null;
           var score;
           if (this.trajectoryCovers(ball, target, ev.changeAtMs, now)) {
-            // Already on a covering path — only tune speed
             plan = this.planIntercept(ball, target, ev.changeAtMs, now) || {
               pendingAngle: null,
               targetSpeed: ball.speed,
-              score: 0
+              score: 0,
+              kind: "on-track"
             };
-            score = plan.score;
+            score = plan.score - 15;
           } else {
             plan = this.planIntercept(ball, target, ev.changeAtMs, now);
             if (!plan) continue;
             score = plan.score + 20;
           }
+          // Prefer free balls / fewer queued jobs for later horizon steps
+          score += (ball.queue.length || 0) * 8;
+          // Prefer reachable soon (lower miss)
+          if (plan.miss != null) score += plan.miss * 0.35;
           if (score < chosenScore) {
             chosenScore = score;
             chosen = bi;
@@ -11385,12 +11696,38 @@ window.APP_VERSION="1.2.5";
             x: target.x,
             y: target.y,
             r: target.r,
-            slot: ev.slot
+            slot: ev.slot,
+            cells: (target.cells || []).map(function (c) {
+              return [c.row, c.col];
+            })
           };
           ball.queue.push(job);
+          assignments.push({
+            slot: ev.slot,
+            inMs: Math.round(ev.changeAtMs - now),
+            ball: ball.colorId,
+            x: Math.round(target.x),
+            y: Math.round(target.y),
+            n: target.count,
+            kind: chosenPlan.kind,
+            miss: chosenPlan.miss != null ? Math.round(chosenPlan.miss) : null,
+            bounces: chosenPlan.bounces,
+            sp: Math.round(chosenPlan.targetSpeed),
+            post: chosenPlan.postSpeed != null ? Math.round(chosenPlan.postSpeed) : null
+          });
           if (planFor[chosen] == null || job.changeAtMs < planFor[chosen].job.changeAtMs) {
             planFor[chosen] = { job: job, plan: chosenPlan };
           }
+        } else {
+          assignments.push({
+            slot: ev.slot,
+            inMs: Math.round(ev.changeAtMs - now),
+            ball: null,
+            x: Math.round(target.x),
+            y: Math.round(target.y),
+            n: target.count,
+            kind: "unassigned"
+          });
         }
       }
     }
@@ -11400,19 +11737,20 @@ window.APP_VERSION="1.2.5";
       ball.queue.sort(function (a, b) { return a.changeAtMs - b.changeAtMs; });
       var pf = planFor[bi];
       if (!pf) {
-        // Cruise at comfortable speed when idle
         if (!ball.queue.length) {
           ball.targetSpeed = clamp(BASE_SPEED + (Math.random() * 2 - 1) * 30, MIN_SPEED, MAX_SPEED);
         }
         continue;
       }
-      ball.targetSpeed = pf.plan.targetSpeed;
-      ball.postSpeed = pf.plan.postSpeed != null ? pf.plan.postSpeed : null;
-      // Angle applied only at the next wall bounce
-      if (pf.plan.pendingAngle != null) {
-        ball.pendingAngle = pf.plan.pendingAngle;
-      }
+      this.applyPlan(ball, pf.plan);
     }
+
+    this._lastAssign = assignments;
+    this.onLog("Mask assign", {
+      n: assignments.length,
+      hits: assignments.filter(function (a) { return a.ball; }).length,
+      rows: assignments.slice(0, 24)
+    });
   };
 
   /** Linear speed change toward targetSpeed; direction unchanged. */
@@ -11458,6 +11796,13 @@ window.APP_VERSION="1.2.5";
           ball.targetSpeed = clamp(ball.postSpeed, MIN_SPEED, MAX_SPEED);
           ball.speed = ball.targetSpeed;
           ball.postSpeed = null;
+        }
+        // Queue next redirect for a later wall (multi-bounce plans)
+        if (ball.angleQueue && ball.angleQueue.length) {
+          ball.pendingAngle = ball.angleQueue.shift();
+          if (ball.postSpeedQueue && ball.postSpeedQueue.length) {
+            ball.postSpeed = ball.postSpeedQueue.shift();
+          }
         }
         ball.vx = Math.cos(ang) * ball.speed;
         ball.vy = Math.sin(ang) * ball.speed;
@@ -11579,6 +11924,74 @@ window.APP_VERSION="1.2.5";
     }
   };
 
+  MaskBalls.prototype.getDebugSnapshot = function (now) {
+    now = now || Date.now();
+    var self = this;
+    var qrChanges = (this.events || []).map(function (ev) {
+      return {
+        slot: ev.slot,
+        inMs: Math.round(ev.changeAtMs - now),
+        diffs: ev.diffCount != null ? ev.diffCount : 0,
+        cells: (ev.diffs || []).slice(0, 20).map(function (d) {
+          return d[0] + "," + d[1];
+        }),
+        targets: (ev.targets || []).map(function (t) {
+          return {
+            x: Math.round(t.x),
+            y: Math.round(t.y),
+            r: Math.round(t.r),
+            n: t.count,
+            ball: t.assigned || null
+          };
+        })
+      };
+    });
+    var balls = this.balls.map(function (b) {
+      var job = b.queue && b.queue[0] ? b.queue[0] : null;
+      var tHit = job ? (job.changeAtMs - now) / 1000 : null;
+      var pred = tHit != null && tHit > 0 ? self.predictAt(b, tHit) : null;
+      var miss = pred && job ? Math.round(hypot(pred.x - job.x, pred.y - job.y)) : null;
+      return {
+        id: b.colorId,
+        x: Math.round(b.x),
+        y: Math.round(b.y),
+        sp: Math.round(b.speed),
+        tgtSp: Math.round(b.targetSpeed || b.speed),
+        ang: Math.round(Math.atan2(b.vy, b.vx) * 180 / Math.PI),
+        cover: !!b.covering,
+        evac: !!b.evacuating || !!b.needEvacuate,
+        pending: b.pendingAngle != null,
+        q: (b.queue || []).map(function (j) {
+          return {
+            slot: j.slot,
+            inMs: Math.round(j.changeAtMs - now),
+            x: Math.round(j.x),
+            y: Math.round(j.y),
+            cells: (j.cells || []).slice(0, 8).map(function (c) {
+              return c[0] + "," + c[1];
+            })
+          };
+        }),
+        pred: pred ? { x: Math.round(pred.x), y: Math.round(pred.y), miss: miss } : null,
+        plan: b.planKind ? { kind: b.planKind, miss: b.planMiss != null ? Math.round(b.planMiss) : null, b: b.planBounces } : null
+      };
+    });
+    return {
+      t: now,
+      qr: qrChanges,
+      balls: balls,
+      assign: this._lastAssign || []
+    };
+  };
+
+  MaskBalls.prototype.emitPlanDebug = function (now, force) {
+    now = now || Date.now();
+    if (!force && this._lastDebugMs && now - this._lastDebugMs < DEBUG_SNAP_MS) return;
+    this._lastDebugMs = now;
+    var snap = this.getDebugSnapshot(now);
+    this.onPlanDebug(snap);
+  };
+
   MaskBalls.prototype.paint = function () {
     if (!this.rgbCtx || !this.cmykCtx) return;
     var w = this.rgbCanvas.width;
@@ -11646,6 +12059,7 @@ window.APP_VERSION="1.2.5";
       return ev.changeAtMs + trail > now - 40;
     });
     this.pruneBallQueues(now);
+    this.emitPlanDebug(now, false);
 
     this.raf = requestAnimationFrame(this.tick.bind(this));
   };
@@ -11750,7 +12164,8 @@ window.APP_VERSION="1.2.5";
     epochIntervalSec: 1,
     maskBalls: null,
     pendingDiffs: null,
-    forecastHorizon: 4
+    forecastHorizon: 8,
+    lastPlanSnap: null
   };
 
   function getEpochIntervalSec() {
@@ -12328,12 +12743,75 @@ window.APP_VERSION="1.2.5";
     if (state.prefetch) state.prefetch.cancelled = true;
   }
 
+  function formatPlanMeta(snap) {
+    if (!snap) return "—";
+    var qrParts = (snap.qr || []).map(function (e) {
+      return "s" + e.slot + "@" + e.inMs + "ms Δ" + e.diffs +
+        "[" + (e.cells || []).slice(0, 6).join(" ") + "]";
+    });
+    var ballParts = (snap.balls || []).map(function (b) {
+      var q0 = b.q && b.q[0] ? ("→s" + b.q[0].slot + "@" + b.q[0].inMs) : "";
+      var pred = b.pred ? (" pred=" + b.pred.x + "," + b.pred.y + " miss=" + b.pred.miss) : "";
+      return b.id + "@" + b.x + "," + b.y + " v" + b.sp + q0 + pred + (b.cover ? " COVER" : "");
+    });
+    return "QR: " + (qrParts.join(" | ") || "none") + " || Balls: " + ballParts.join(" · ");
+  }
+
+  function onMaskPlanDebug(snap) {
+    state.lastPlanSnap = snap;
+    setMeta("d-forecast", formatPlanMeta(snap));
+    var shortBalls = (snap.balls || []).map(function (b) {
+      return b.id + ":" + b.x + "," + b.y +
+        (b.pred && b.pred.miss != null ? "/m" + b.pred.miss : "") +
+        (b.cover ? "*" : "");
+    }).join(" ");
+    setMeta("d-ballpos", shortBalls || "—");
+    var near = (snap.qr || []).filter(function (e) { return e.inMs > -80 && e.inMs < 1200; });
+    var nowMs = Date.now();
+    // Meta updates every snap; log lines ~2×/s when a flip is near
+    if (near.length && (!state._lastPlanLogMs || nowMs - state._lastPlanLogMs > 480)) {
+      state._lastPlanLogMs = nowMs;
+      log("Plan tick", {
+        qr: near.map(function (e) {
+          return { slot: e.slot, inMs: e.inMs, diffs: e.diffs, cells: e.cells, targets: e.targets };
+        }),
+        balls: (snap.balls || []).map(function (b) {
+          return {
+            id: b.id,
+            xy: [b.x, b.y],
+            sp: b.sp,
+            q: b.q,
+            pred: b.pred,
+            plan: b.plan,
+            cover: b.cover
+          };
+        })
+      });
+    }
+  }
+
   function pushForecastToBalls(events) {
     if (!state.maskBalls || !state.maskBalls.enabled) return;
     state.maskBalls.setForecast(events, { intervalMs: getEpochIntervalSec() * 1000 });
     var n = 0;
-    for (var i = 0; i < events.length; i++) n += (events[i].diffs && events[i].diffs.length) ? 1 : 0;
+    var flips = [];
+    for (var i = 0; i < events.length; i++) {
+      var d = events[i].diffs ? events[i].diffs.length : 0;
+      if (d) n++;
+      flips.push(d);
+    }
     setMeta("d-balls", "on (H" + events.length + "/" + n + ")");
+    log("QR forecast diffs", {
+      horizon: events.length,
+      flips: flips,
+      slots: events.map(function (e) {
+        return {
+          slot: e.slot,
+          inMs: Math.round(e.changeAtMs - Date.now()),
+          cells: (e.diffs || []).slice(0, 24).map(function (c) { return c[0] + "," + c[1]; })
+        };
+      })
+    });
   }
 
   function planMaskBallsFromFrame(frame, changeAtMs) {
@@ -12355,7 +12833,7 @@ window.APP_VERSION="1.2.5";
     cancelPrefetch();
     var interval = getEpochIntervalSec();
     var horizon = state.maskBalls && state.maskBalls.enabled
-      ? Math.max(2, state.forecastHorizon | 0)
+      ? Math.max(3, state.forecastHorizon | 0)
       : 1;
     var nextSlot = slotJustShown + 1;
     var nextEpoch = nextSlot * interval;
@@ -12382,9 +12860,13 @@ window.APP_VERSION="1.2.5";
         if (token.cancelled) return null;
         var slot = slotJustShown + step;
         var epoch = slot * interval;
+        // Keep later horizon steps useful — do not collapse budget to near-zero
         var budget = step === 1
           ? budget1
-          : Math.min(IS_MOBILE ? 220 : 320, Math.max(100, budget1 * (0.55 - step * 0.06)));
+          : Math.min(
+              IS_MOBILE ? 280 : 420,
+              Math.max(IS_MOBILE ? 140 : 200, budget1 * Math.max(0.28, 0.72 - step * 0.05))
+            );
         var frame = await buildFrame(
           state.api,
           epoch,
@@ -12406,9 +12888,13 @@ window.APP_VERSION="1.2.5";
           margin: MARGIN,
           diffs: diffs
         });
+        // Push partial forecast early so balls can start aiming while later steps compute
+        if (!token.cancelled && (step === 1 || step === 3 || step === horizon)) {
+          if (events[0] && events[0].diffs) state.pendingDiffs = events[0].diffs;
+          pushForecastToBalls(events.slice());
+        }
         mods = frame.result.modules;
         pad = frame.canonical.pad;
-        // Yield so UI stays responsive across horizon steps
         await yieldToBrowser();
       }
 
@@ -12417,7 +12903,8 @@ window.APP_VERSION="1.2.5";
         pushForecastToBalls(events);
         log("Prefetch horizon", {
           steps: events.length,
-          flips: events.map(function (e) { return e.diffs ? e.diffs.length : 0; })
+          flips: events.map(function (e) { return e.diffs ? e.diffs.length : 0; }),
+          budgets: "step1=" + Math.round(budget1) + "ms"
         });
       }
       return firstFrame;
@@ -12691,7 +13178,8 @@ window.APP_VERSION="1.2.5";
     if (typeof MaskBalls === "function") {
       state.maskBalls = new MaskBalls({
         getQrRect: getQrContentRect,
-        onLog: function (msg, detail) { log(msg, detail); }
+        onLog: function (msg, detail) { log(msg, detail); },
+        onPlanDebug: onMaskPlanDebug
       });
     }
 

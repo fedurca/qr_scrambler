@@ -78,7 +78,8 @@
     epochIntervalSec: 1,
     maskBalls: null,
     pendingDiffs: null,
-    forecastHorizon: 4
+    forecastHorizon: 8,
+    lastPlanSnap: null
   };
 
   function getEpochIntervalSec() {
@@ -656,12 +657,75 @@
     if (state.prefetch) state.prefetch.cancelled = true;
   }
 
+  function formatPlanMeta(snap) {
+    if (!snap) return "—";
+    var qrParts = (snap.qr || []).map(function (e) {
+      return "s" + e.slot + "@" + e.inMs + "ms Δ" + e.diffs +
+        "[" + (e.cells || []).slice(0, 6).join(" ") + "]";
+    });
+    var ballParts = (snap.balls || []).map(function (b) {
+      var q0 = b.q && b.q[0] ? ("→s" + b.q[0].slot + "@" + b.q[0].inMs) : "";
+      var pred = b.pred ? (" pred=" + b.pred.x + "," + b.pred.y + " miss=" + b.pred.miss) : "";
+      return b.id + "@" + b.x + "," + b.y + " v" + b.sp + q0 + pred + (b.cover ? " COVER" : "");
+    });
+    return "QR: " + (qrParts.join(" | ") || "none") + " || Balls: " + ballParts.join(" · ");
+  }
+
+  function onMaskPlanDebug(snap) {
+    state.lastPlanSnap = snap;
+    setMeta("d-forecast", formatPlanMeta(snap));
+    var shortBalls = (snap.balls || []).map(function (b) {
+      return b.id + ":" + b.x + "," + b.y +
+        (b.pred && b.pred.miss != null ? "/m" + b.pred.miss : "") +
+        (b.cover ? "*" : "");
+    }).join(" ");
+    setMeta("d-ballpos", shortBalls || "—");
+    var near = (snap.qr || []).filter(function (e) { return e.inMs > -80 && e.inMs < 1200; });
+    var nowMs = Date.now();
+    // Meta updates every snap; log lines ~2×/s when a flip is near
+    if (near.length && (!state._lastPlanLogMs || nowMs - state._lastPlanLogMs > 480)) {
+      state._lastPlanLogMs = nowMs;
+      log("Plan tick", {
+        qr: near.map(function (e) {
+          return { slot: e.slot, inMs: e.inMs, diffs: e.diffs, cells: e.cells, targets: e.targets };
+        }),
+        balls: (snap.balls || []).map(function (b) {
+          return {
+            id: b.id,
+            xy: [b.x, b.y],
+            sp: b.sp,
+            q: b.q,
+            pred: b.pred,
+            plan: b.plan,
+            cover: b.cover
+          };
+        })
+      });
+    }
+  }
+
   function pushForecastToBalls(events) {
     if (!state.maskBalls || !state.maskBalls.enabled) return;
     state.maskBalls.setForecast(events, { intervalMs: getEpochIntervalSec() * 1000 });
     var n = 0;
-    for (var i = 0; i < events.length; i++) n += (events[i].diffs && events[i].diffs.length) ? 1 : 0;
+    var flips = [];
+    for (var i = 0; i < events.length; i++) {
+      var d = events[i].diffs ? events[i].diffs.length : 0;
+      if (d) n++;
+      flips.push(d);
+    }
     setMeta("d-balls", "on (H" + events.length + "/" + n + ")");
+    log("QR forecast diffs", {
+      horizon: events.length,
+      flips: flips,
+      slots: events.map(function (e) {
+        return {
+          slot: e.slot,
+          inMs: Math.round(e.changeAtMs - Date.now()),
+          cells: (e.diffs || []).slice(0, 24).map(function (c) { return c[0] + "," + c[1]; })
+        };
+      })
+    });
   }
 
   function planMaskBallsFromFrame(frame, changeAtMs) {
@@ -683,7 +747,7 @@
     cancelPrefetch();
     var interval = getEpochIntervalSec();
     var horizon = state.maskBalls && state.maskBalls.enabled
-      ? Math.max(2, state.forecastHorizon | 0)
+      ? Math.max(3, state.forecastHorizon | 0)
       : 1;
     var nextSlot = slotJustShown + 1;
     var nextEpoch = nextSlot * interval;
@@ -710,9 +774,13 @@
         if (token.cancelled) return null;
         var slot = slotJustShown + step;
         var epoch = slot * interval;
+        // Keep later horizon steps useful — do not collapse budget to near-zero
         var budget = step === 1
           ? budget1
-          : Math.min(IS_MOBILE ? 220 : 320, Math.max(100, budget1 * (0.55 - step * 0.06)));
+          : Math.min(
+              IS_MOBILE ? 280 : 420,
+              Math.max(IS_MOBILE ? 140 : 200, budget1 * Math.max(0.28, 0.72 - step * 0.05))
+            );
         var frame = await buildFrame(
           state.api,
           epoch,
@@ -734,9 +802,13 @@
           margin: MARGIN,
           diffs: diffs
         });
+        // Push partial forecast early so balls can start aiming while later steps compute
+        if (!token.cancelled && (step === 1 || step === 3 || step === horizon)) {
+          if (events[0] && events[0].diffs) state.pendingDiffs = events[0].diffs;
+          pushForecastToBalls(events.slice());
+        }
         mods = frame.result.modules;
         pad = frame.canonical.pad;
-        // Yield so UI stays responsive across horizon steps
         await yieldToBrowser();
       }
 
@@ -745,7 +817,8 @@
         pushForecastToBalls(events);
         log("Prefetch horizon", {
           steps: events.length,
-          flips: events.map(function (e) { return e.diffs ? e.diffs.length : 0; })
+          flips: events.map(function (e) { return e.diffs ? e.diffs.length : 0; }),
+          budgets: "step1=" + Math.round(budget1) + "ms"
         });
       }
       return firstFrame;
@@ -1019,7 +1092,8 @@
     if (typeof MaskBalls === "function") {
       state.maskBalls = new MaskBalls({
         getQrRect: getQrContentRect,
-        onLog: function (msg, detail) { log(msg, detail); }
+        onLog: function (msg, detail) { log(msg, detail); },
+        onPlanDebug: onMaskPlanDebug
       });
     }
 

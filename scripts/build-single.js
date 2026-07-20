@@ -69,6 +69,8 @@ ${css}
         <dt>render</dt><dd id="d-render">—</dd>
         <dt>interval</dt><dd id="d-interval">1 s</dd>
         <dt>balls</dt><dd id="d-balls">off</dd>
+        <dt>forecast</dt><dd id="d-forecast">—</dd>
+        <dt>ball pos</dt><dd id="d-ballpos">—</dd>
         <dt>pad len</dt><dd id="d-pad">—</dd>
         <dt>epoch</dt><dd id="d-epoch">—</dd>
         <dt>raw Δ</dt><dd id="d-raw">—</dd>
