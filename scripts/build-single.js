@@ -54,6 +54,7 @@ ${css}
         <option value="snake">Snake</option>
         <option value="tetris">Tetris</option>
         <option value="life">Game of Life</option>
+        <option value="snow">Sněžení</option>
         <option value="none">Žádné</option>
       </select>
     </label>

@@ -1,37 +1,42 @@
 /**
- * Ambient "arcade" masking around the QR: Snake, Tetris, Game of Life.
+ * In-QR "arcade" masking: Snake, Tetris, Game of Life, Snow.
  *
- * A full-viewport transparent canvas renders a grid animation but never paints
- * the cells that overlap the QR symbol (a hole is punched around it), so the
- * code stays crisp and scannable while continuous motion around it provides
- * change-blindness cover for the once-per-interval module swap.
+ * Unlike an ambient border animation, these draw BLACK, module-aligned pixels
+ * directly ON the QR grid — a snake crawls through the code, Game-of-Life
+ * gliders pass across it, tetrominoes fall through it, snow drifts down it.
  *
- * Pure canvas + grid logic; no dependency on mask-balls / mask-methods.
+ * Why it still scans: the displayed frame is a valid QR codeword, so the reader
+ * has the full Reed-Solomon budget spare (v4+H corrects ~30% of codewords). The
+ * entities are kept sparse and in constant motion, so at any instant only a few
+ * modules are overlaid — well within error correction — while the motion over
+ * the changed region hides the per-interval flip (change blindness + occlusion).
+ *
+ * The overlay canvas is positioned exactly over the QR content rect and cells
+ * are mapped to module coordinates (inside the symbol, never the quiet zone).
  */
 (function (global) {
   "use strict";
 
-  var CELL_CSS = 22;         // logical cell size (px) before DPR scaling
-  var STEP_MS = { snake: 90, tetris: 110, life: 150 };
+  var STEP_MS = { snake: 110, tetris: 130, life: 160, snow: 120 };
+  var INK = "#000000";
 
   function MaskArcade(opts) {
     opts = opts || {};
-    this.getQrRect = opts.getQrRect || function () { return null; };
+    this.getQrInfo = opts.getQrInfo || function () { return null; };
     this.mode = null;
     this.canvas = null;
     this.ctx = null;
     this.raf = 0;
     this.lastStep = 0;
     this.dpr = 1;
-    this.cols = 0;
-    this.rows = 0;
-    this.cell = CELL_CSS;
-    this.blocked = null;
+    this.size = 0;       // modules per side (data area)
+    this.margin = 2;
+    this.cell = 0;       // device px per module
     this.state = null;
     this._loop = this.loop.bind(this);
   }
 
-  MaskArcade.MODES = ["snake", "tetris", "life"];
+  MaskArcade.MODES = ["snake", "tetris", "life", "snow"];
 
   MaskArcade.prototype.ensureCanvas = function () {
     if (this.canvas) return this.canvas;
@@ -42,52 +47,33 @@
     c.style.left = "0px";
     c.style.top = "0px";
     c.style.pointerEvents = "none";
-    c.style.zIndex = "20";
+    c.style.zIndex = "30";
     document.body.appendChild(c);
     this.canvas = c;
     this.ctx = c.getContext("2d");
     return c;
   };
 
-  MaskArcade.prototype.computeGrid = function () {
+  /** Align the canvas to the QR content rect; returns false if geometry unknown. */
+  MaskArcade.prototype.sync = function () {
+    var info = this.getQrInfo();
+    if (!info || !info.rect) return false;
     this.ensureCanvas();
     this.dpr = Math.min(2, global.devicePixelRatio || 1);
-    var w = global.innerWidth;
-    var h = global.innerHeight;
+    this.size = info.size;
+    this.margin = info.margin;
+    var rect = info.rect;
+    var w = Math.max(1, Math.round(rect.width));
+    var h = Math.max(1, Math.round(rect.height));
+    this.canvas.style.left = Math.round(rect.left) + "px";
+    this.canvas.style.top = Math.round(rect.top) + "px";
     this.canvas.style.width = w + "px";
     this.canvas.style.height = h + "px";
     this.canvas.width = Math.max(1, Math.round(w * this.dpr));
     this.canvas.height = Math.max(1, Math.round(h * this.dpr));
-    this.cell = CELL_CSS * this.dpr;
-    this.cols = Math.max(4, Math.ceil(this.canvas.width / this.cell));
-    this.rows = Math.max(4, Math.ceil(this.canvas.height / this.cell));
-    this.rebuildHole();
-  };
-
-  /** Mark grid cells overlapping the QR (plus a margin) as blocked. */
-  MaskArcade.prototype.rebuildHole = function () {
-    var n = this.rows * this.cols;
-    if (!this.blocked || this.blocked.length !== n) this.blocked = new Uint8Array(n);
-    else this.blocked.fill(0);
-    var rect = this.getQrRect();
-    if (!rect) return;
-    var pad = this.cell * 0.6;
-    var x0 = (rect.left * this.dpr) - pad;
-    var y0 = (rect.top * this.dpr) - pad;
-    var x1 = ((rect.left + rect.width) * this.dpr) + pad;
-    var y1 = ((rect.top + rect.height) * this.dpr) + pad;
-    var gx0 = Math.max(0, Math.floor(x0 / this.cell));
-    var gy0 = Math.max(0, Math.floor(y0 / this.cell));
-    var gx1 = Math.min(this.cols - 1, Math.floor(x1 / this.cell));
-    var gy1 = Math.min(this.rows - 1, Math.floor(y1 / this.cell));
-    for (var gy = gy0; gy <= gy1; gy++) {
-      for (var gx = gx0; gx <= gx1; gx++) this.blocked[gy * this.cols + gx] = 1;
-    }
-  };
-
-  MaskArcade.prototype.isBlocked = function (x, y) {
-    if (x < 0 || y < 0 || x >= this.cols || y >= this.rows) return true;
-    return !!this.blocked[y * this.cols + x];
+    var n = this.size + this.margin * 2;
+    this.cell = this.canvas.width / n;
+    return true;
   };
 
   MaskArcade.prototype.setMode = function (mode) {
@@ -101,10 +87,16 @@
     }
     this.ensureCanvas();
     this.canvas.style.display = "block";
-    this.computeGrid();
+    if (!this.sync()) {
+      // QR not painted yet — retry shortly
+      var self = this;
+      setTimeout(function () { if (self.mode === mode) self.setMode(mode); }, 120);
+      return;
+    }
     if (mode === "snake") this.state = this.newSnake();
     else if (mode === "tetris") this.state = this.newTetris();
-    else this.state = this.newLife();
+    else if (mode === "life") this.state = this.newLife();
+    else this.state = this.newSnow();
     this.lastStep = 0;
     this.raf = requestAnimationFrame(this._loop);
   };
@@ -115,264 +107,211 @@
 
   MaskArcade.prototype.loop = function (ts) {
     if (!this.mode) { this.raf = 0; return; }
-    // Track viewport / QR movement.
-    if (this.canvas.width !== Math.round(global.innerWidth * this.dpr) ||
-        this.canvas.height !== Math.round(global.innerHeight * this.dpr)) {
-      this.computeGrid();
-    } else {
-      this.rebuildHole();
-    }
-    var interval = STEP_MS[this.mode] || 120;
+    this.sync();
+    var interval = STEP_MS[this.mode] || 130;
     if (!this.lastStep || ts - this.lastStep >= interval) {
       this.lastStep = ts;
       if (this.mode === "snake") this.stepSnake();
       else if (this.mode === "tetris") this.stepTetris();
-      else this.stepLife();
+      else if (this.mode === "life") this.stepLife();
+      else this.stepSnow();
       this.draw();
     }
     this.raf = requestAnimationFrame(this._loop);
   };
 
-  MaskArcade.prototype.fillCell = function (x, y, color) {
-    if (this.isBlocked(x, y)) return;
-    var px = x * this.cell;
-    var py = y * this.cell;
-    var g = this.cell * 0.12;
-    this.ctx.fillStyle = color;
-    this.ctx.fillRect(px + g, py + g, this.cell - 2 * g, this.cell - 2 * g);
+  /** Draw one module cell (module coords) as black. */
+  MaskArcade.prototype.fillModule = function (col, row) {
+    if (col < 0 || row < 0 || col >= this.size || row >= this.size) return;
+    var px = (col + this.margin) * this.cell;
+    var py = (row + this.margin) * this.cell;
+    // Full-cell fill so it reads as a module (no gap seams against the code).
+    this.ctx.fillRect(Math.floor(px), Math.floor(py), Math.ceil(this.cell), Math.ceil(this.cell));
+  };
+
+  MaskArcade.prototype.beginInk = function () {
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    this.ctx.fillStyle = INK;
   };
 
   // ---- Snake -------------------------------------------------------------
-  MaskArcade.prototype.freeCell = function () {
-    for (var tries = 0; tries < 200; tries++) {
-      var x = (Math.random() * this.cols) | 0;
-      var y = (Math.random() * this.rows) | 0;
-      if (!this.isBlocked(x, y)) return { x: x, y: y };
-    }
-    return { x: 0, y: 0 };
-  };
-
   MaskArcade.prototype.newSnake = function () {
-    var start = this.freeCell();
+    var s = (this.size / 2) | 0;
     var body = [];
-    for (var i = 0; i < 4; i++) body.push({ x: start.x, y: start.y });
-    return { body: body, dir: { x: 1, y: 0 }, food: this.freeCell() };
+    for (var i = 0; i < 10; i++) body.push({ x: s - i, y: s });
+    return { body: body, dir: { x: 1, y: 0 }, len: 12, turn: 0 };
   };
 
   MaskArcade.prototype.stepSnake = function () {
-    var s = this.state;
-    var head = s.body[0];
-    var dirs = [{ x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 }];
-    var occupied = {};
-    for (var i = 0; i < s.body.length; i++) occupied[s.body[i].x + "," + s.body[i].y] = 1;
-    var self = this;
-    function safe(d) {
-      var nx = head.x + d.x, ny = head.y + d.y;
-      if (self.isBlocked(nx, ny)) return false;
-      // allow moving into current tail cell (it will move)
-      var tail = s.body[s.body.length - 1];
-      if (occupied[nx + "," + ny] && !(nx === tail.x && ny === tail.y)) return false;
-      return true;
+    var st = this.state;
+    var head = st.body[0];
+    // Occasionally turn (biased to keep crawling across the code).
+    st.turn -= 1;
+    if (st.turn <= 0 && Math.random() < 0.5) {
+      var left = { x: st.dir.y, y: -st.dir.x };
+      var right = { x: -st.dir.y, y: st.dir.x };
+      st.dir = Math.random() < 0.5 ? left : right;
+      st.turn = 2 + ((Math.random() * 4) | 0);
     }
-    // greedy toward food among safe non-reverse dirs
-    var best = null, bestD = Infinity;
-    for (i = 0; i < dirs.length; i++) {
-      var d = dirs[i];
-      if (d.x === -s.dir.x && d.y === -s.dir.y) continue;
-      if (!safe(d)) continue;
-      var dist = Math.abs(head.x + d.x - s.food.x) + Math.abs(head.y + d.y - s.food.y);
-      if (dist < bestD) { bestD = dist; best = d; }
-    }
-    if (best) s.dir = best;
-    var nh = { x: head.x + s.dir.x, y: head.y + s.dir.y };
-    if (this.isBlocked(nh.x, nh.y) || (occupied[nh.x + "," + nh.y] &&
-        !(nh.x === s.body[s.body.length - 1].x && nh.y === s.body[s.body.length - 1].y))) {
-      this.state = this.newSnake();
-      return;
-    }
-    s.body.unshift(nh);
-    if (nh.x === s.food.x && nh.y === s.food.y) {
-      s.food = this.freeCell();
-      if (s.body.length > 60) s.body.length = 60;
-    } else {
-      s.body.pop();
-    }
+    var nx = head.x + st.dir.x;
+    var ny = head.y + st.dir.y;
+    // Bounce off the symbol edges (reflect the component that went out).
+    if (nx < 0 || nx >= this.size) { st.dir.x = -st.dir.x; nx = head.x + st.dir.x; }
+    if (ny < 0 || ny >= this.size) { st.dir.y = -st.dir.y; ny = head.y + st.dir.y; }
+    nx = Math.max(0, Math.min(this.size - 1, nx));
+    ny = Math.max(0, Math.min(this.size - 1, ny));
+    st.body.unshift({ x: nx, y: ny });
+    while (st.body.length > st.len) st.body.pop();
   };
 
-  // ---- Tetris ------------------------------------------------------------
+  // ---- Tetris (falling, passes through — no permanent stack) -------------
   MaskArcade.TETROMINOES = [
-    { c: "#43c6ff", cells: [[0, 0], [1, 0], [2, 0], [3, 0]] }, // I
-    { c: "#ffd23f", cells: [[0, 0], [1, 0], [0, 1], [1, 1]] }, // O
-    { c: "#b06dff", cells: [[1, 0], [0, 1], [1, 1], [2, 1]] }, // T
-    { c: "#5cd65c", cells: [[1, 0], [2, 0], [0, 1], [1, 1]] }, // S
-    { c: "#ff6b6b", cells: [[0, 0], [1, 0], [1, 1], [2, 1]] }, // Z
-    { c: "#5a8bff", cells: [[0, 0], [0, 1], [1, 1], [2, 1]] }, // J
-    { c: "#ff9f43", cells: [[2, 0], [0, 1], [1, 1], [2, 1]] }  // L
+    [[0, 0], [1, 0], [2, 0], [3, 0]],
+    [[0, 0], [1, 0], [0, 1], [1, 1]],
+    [[1, 0], [0, 1], [1, 1], [2, 1]],
+    [[1, 0], [2, 0], [0, 1], [1, 1]],
+    [[0, 0], [1, 0], [1, 1], [2, 1]],
+    [[0, 0], [0, 1], [1, 1], [2, 1]],
+    [[2, 0], [0, 1], [1, 1], [2, 1]]
   ];
 
-  MaskArcade.prototype.newTetris = function () {
-    var st = { occ: new Uint8Array(this.rows * this.cols), color: [], piece: null };
-    st.color = new Array(this.rows * this.cols);
-    this.tetSpawn(st);
-    return st;
-  };
-
-  MaskArcade.prototype.tetSpawn = function (st) {
+  MaskArcade.prototype.spawnPiece = function () {
     var t = MaskArcade.TETROMINOES[(Math.random() * MaskArcade.TETROMINOES.length) | 0];
-    var ox = (this.cols / 2 - 2) | 0;
-    st.piece = { color: t.c, cells: t.cells.map(function (c) { return [c[0] + ox, c[1]]; }) };
-    if (this.tetCollide(st, st.piece.cells)) {
-      // board full — reset
-      st.occ = new Uint8Array(this.rows * this.cols);
-      st.color = new Array(this.rows * this.cols);
-    }
+    var ox = 1 + ((Math.random() * (this.size - 4)) | 0);
+    return { cells: t.map(function (c) { return [c[0] + ox, c[1]]; }), y: -2, drift: 0 };
   };
 
-  MaskArcade.prototype.tetCollide = function (st, cells) {
-    for (var i = 0; i < cells.length; i++) {
-      var x = cells[i][0], y = cells[i][1];
-      if (x < 0 || x >= this.cols || y >= this.rows) return true;
-      if (y < 0) continue;
-      if (this.isBlocked(x, y)) return true;
-      if (st.occ[y * this.cols + x]) return true;
-    }
-    return false;
+  MaskArcade.prototype.newTetris = function () {
+    return { pieces: [this.spawnPiece()], spawnIn: 3 };
   };
 
   MaskArcade.prototype.stepTetris = function () {
     var st = this.state;
-    if (!st.piece) this.tetSpawn(st);
-    var p = st.piece;
-    // occasional horizontal drift for variety
-    if (Math.random() < 0.25) {
-      var dx = Math.random() < 0.5 ? -1 : 1;
-      var moved = p.cells.map(function (c) { return [c[0] + dx, c[1]]; });
-      if (!this.tetCollide(st, moved)) p.cells = moved;
+    for (var i = st.pieces.length - 1; i >= 0; i--) {
+      var p = st.pieces[i];
+      p.y += 1;
+      if (Math.random() < 0.2) p.drift += (Math.random() < 0.5 ? -1 : 1);
+      var top = 999;
+      for (var c = 0; c < p.cells.length; c++) top = Math.min(top, p.cells[c][1] + p.y);
+      if (top >= this.size) st.pieces.splice(i, 1); // fell through
     }
-    var down = p.cells.map(function (c) { return [c[0], c[1] + 1]; });
-    if (this.tetCollide(st, down)) {
-      // lock
-      for (var i = 0; i < p.cells.length; i++) {
-        var x = p.cells[i][0], y = p.cells[i][1];
-        if (y >= 0 && y < this.rows && x >= 0 && x < this.cols && !this.isBlocked(x, y)) {
-          st.occ[y * this.cols + x] = 1;
-          st.color[y * this.cols + x] = p.color;
-        }
-      }
-      this.tetClear(st);
-      this.tetSpawn(st);
-    } else {
-      p.cells = down;
+    st.spawnIn -= 1;
+    if (st.spawnIn <= 0 && st.pieces.length < 2) {
+      st.pieces.push(this.spawnPiece());
+      st.spawnIn = 4 + ((Math.random() * 4) | 0);
     }
+    if (!st.pieces.length) { st.pieces.push(this.spawnPiece()); st.spawnIn = 5; }
   };
 
-  MaskArcade.prototype.tetClear = function (st) {
-    var cleared = {};
-    for (var r = 0; r < this.rows; r++) {
-      var play = 0, fill = 0;
-      for (var c = 0; c < this.cols; c++) {
-        if (this.isBlocked(c, r)) continue;
-        play++;
-        if (st.occ[r * this.cols + c]) fill++;
-      }
-      if (play > 0 && fill === play) cleared[r] = 1;
-    }
-    if (!Object.keys(cleared).length) return;
-    // Column compaction: drop filled cells to the bottom, skipping blocked + cleared.
-    for (c = 0; c < this.cols; c++) {
-      var stack = [];
-      for (r = this.rows - 1; r >= 0; r--) {
-        if (this.isBlocked(c, r)) continue;
-        var idx = r * this.cols + c;
-        if (cleared[r]) { st.occ[idx] = 0; st.color[idx] = null; continue; }
-        if (st.occ[idx]) { stack.push(st.color[idx]); st.occ[idx] = 0; st.color[idx] = null; }
-      }
-      var k = 0;
-      for (r = this.rows - 1; r >= 0 && k < stack.length; r--) {
-        if (this.isBlocked(c, r)) continue;
-        st.occ[r * this.cols + c] = 1;
-        st.color[r * this.cols + c] = stack[k++];
-      }
-    }
-  };
+  // ---- Game of Life (gliders traverse the code, toroidal) ----------------
+  MaskArcade.GLIDER = [[1, 0], [2, 1], [0, 2], [1, 2], [2, 2]];
 
-  // ---- Game of Life ------------------------------------------------------
   MaskArcade.prototype.newLife = function () {
-    var st = { grid: new Uint8Array(this.rows * this.cols), gen: 0, lastPop: -1, stag: 0 };
-    this.lifeSeed(st);
+    var st = { grid: new Uint8Array(this.size * this.size), gen: 0 };
+    this.seedGliders(st);
     return st;
   };
 
-  MaskArcade.prototype.lifeSeed = function (st) {
-    for (var i = 0; i < st.grid.length; i++) {
-      var x = i % this.cols, y = (i / this.cols) | 0;
-      st.grid[i] = (!this.isBlocked(x, y) && Math.random() < 0.18) ? 1 : 0;
+  MaskArcade.prototype.seedGliders = function (st) {
+    st.grid = new Uint8Array(this.size * this.size);
+    var count = 3 + ((Math.random() * 3) | 0);
+    for (var g = 0; g < count; g++) {
+      var ox = (Math.random() * this.size) | 0;
+      var oy = (Math.random() * this.size) | 0;
+      var flipX = Math.random() < 0.5 ? 1 : -1;
+      var flipY = Math.random() < 0.5 ? 1 : -1;
+      for (var i = 0; i < MaskArcade.GLIDER.length; i++) {
+        var x = ((ox + MaskArcade.GLIDER[i][0] * flipX) % this.size + this.size) % this.size;
+        var y = ((oy + MaskArcade.GLIDER[i][1] * flipY) % this.size + this.size) % this.size;
+        st.grid[y * this.size + x] = 1;
+      }
     }
     st.gen = 0;
-    st.lastPop = -1;
-    st.stag = 0;
   };
 
   MaskArcade.prototype.stepLife = function () {
     var st = this.state;
-    var next = new Uint8Array(this.rows * this.cols);
+    var N = this.size;
+    var next = new Uint8Array(N * N);
     var pop = 0;
-    for (var y = 0; y < this.rows; y++) {
-      for (var x = 0; x < this.cols; x++) {
-        if (this.isBlocked(x, y)) { next[y * this.cols + x] = 0; continue; }
+    for (var y = 0; y < N; y++) {
+      for (var x = 0; x < N; x++) {
         var n = 0;
         for (var dy = -1; dy <= 1; dy++) {
           for (var dx = -1; dx <= 1; dx++) {
             if (!dx && !dy) continue;
-            var nx = x + dx, ny = y + dy;
-            if (nx < 0 || ny < 0 || nx >= this.cols || ny >= this.rows) continue;
-            if (this.isBlocked(nx, ny)) continue;
-            n += st.grid[ny * this.cols + nx];
+            var nx = (x + dx + N) % N;
+            var ny = (y + dy + N) % N;
+            n += st.grid[ny * N + nx];
           }
         }
-        var alive = st.grid[y * this.cols + x];
+        var alive = st.grid[y * N + x];
         var live = alive ? (n === 2 || n === 3) : (n === 3);
-        next[y * this.cols + x] = live ? 1 : 0;
+        next[y * N + x] = live ? 1 : 0;
         if (live) pop++;
       }
     }
     st.grid = next;
     st.gen++;
-    if (pop === st.lastPop) st.stag++; else st.stag = 0;
-    st.lastPop = pop;
-    if (pop < this.cols * this.rows * 0.01 || st.gen > 260 || st.stag > 16) this.lifeSeed(st);
+    // Keep it sparse & glider-like: reseed on overcrowding, extinction, or age.
+    if (pop > N * N * 0.10 || pop < 4 || st.gen > 90) this.seedGliders(st);
+  };
+
+  // ---- Snow (flakes drift down the code) ---------------------------------
+  MaskArcade.prototype.newSnow = function () {
+    var flakes = [];
+    var count = Math.max(6, (this.size * 0.4) | 0);
+    for (var i = 0; i < count; i++) {
+      flakes.push({
+        x: (Math.random() * this.size) | 0,
+        y: Math.random() * this.size,
+        v: 0.5 + Math.random() * 0.9,
+        drift: Math.random() < 0.5 ? 0 : (Math.random() < 0.5 ? -1 : 1)
+      });
+    }
+    return { flakes: flakes };
+  };
+
+  MaskArcade.prototype.stepSnow = function () {
+    var st = this.state;
+    for (var i = 0; i < st.flakes.length; i++) {
+      var f = st.flakes[i];
+      f.y += f.v;
+      if (Math.random() < 0.25) f.x += f.drift;
+      if (f.x < 0) f.x = this.size - 1;
+      if (f.x >= this.size) f.x = 0;
+      if (f.y >= this.size) {
+        f.y = -Math.random() * 3;
+        f.x = (Math.random() * this.size) | 0;
+        f.v = 0.5 + Math.random() * 0.9;
+      }
+    }
   };
 
   // ---- Draw --------------------------------------------------------------
   MaskArcade.prototype.draw = function () {
-    var ctx = this.ctx;
-    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    var x, y, i;
+    if (!this.ctx || !this.size) return;
+    this.beginInk();
+    var i;
     if (this.mode === "snake") {
-      var s = this.state;
-      this.fillCell(s.food.x, s.food.y, "#ff8c42");
-      for (i = 0; i < s.body.length; i++) {
-        var t = 1 - i / (s.body.length + 2);
-        var g = Math.round(120 + 110 * t);
-        this.fillCell(s.body[i].x, s.body[i].y, i === 0 ? "#9dffb0" : "rgba(60," + g + ",90,0.9)");
-      }
+      var b = this.state.body;
+      for (i = 0; i < b.length; i++) this.fillModule(b[i].x, b[i].y);
     } else if (this.mode === "tetris") {
-      var st = this.state;
-      for (i = 0; i < st.occ.length; i++) {
-        if (!st.occ[i]) continue;
-        this.fillCell(i % this.cols, (i / this.cols) | 0, st.color[i] || "#43c6ff");
-      }
-      if (st.piece) {
-        for (i = 0; i < st.piece.cells.length; i++) {
-          this.fillCell(st.piece.cells[i][0], st.piece.cells[i][1], st.piece.color);
+      var ps = this.state.pieces;
+      for (i = 0; i < ps.length; i++) {
+        var p = ps[i];
+        for (var c = 0; c < p.cells.length; c++) {
+          this.fillModule(p.cells[c][0] + p.drift, p.cells[c][1] + p.y);
         }
       }
     } else if (this.mode === "life") {
       var grid = this.state.grid;
       for (i = 0; i < grid.length; i++) {
-        if (!grid[i]) continue;
-        this.fillCell(i % this.cols, (i / this.cols) | 0, "rgba(90,220,180,0.85)");
+        if (grid[i]) this.fillModule(i % this.size, (i / this.size) | 0);
       }
+    } else if (this.mode === "snow") {
+      var fl = this.state.flakes;
+      for (i = 0; i < fl.length; i++) this.fillModule(fl[i].x, Math.floor(fl[i].y));
     }
   };
 

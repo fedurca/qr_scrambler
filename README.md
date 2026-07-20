@@ -55,7 +55,7 @@ Výběr metody v UI (`Maskování`), default **crossfade**:
 | **koule** | 7 koulí **R G B C M Y K** letí rovně, směr mění jen odrazem od okrajů; RGB aditivně, CMYK substraktivně (skupiny se nemíchají); změny se počítají dopředu a koule je krátce překryjí |
 | **shimmer** | trvalý jemný nízkokontrastní dither přes celý symbol – reálná změna zanikne v ambientní mikrodynamice |
 | **měkká záplata** | tlumený rozmazaný blob v barvě kódu krátce překryje měněné buňky, swap proběhne pod ním, pak vyprchá |
-| **snake / tetris / game of life** | ambientní herní animace **okolo QR** (`js/mask-arcade.js`) – celoobrazovkový canvas s vyříznutou dírou pro QR, takže kód zůstává ostrý; pohyb okolo poskytuje change-blindness krytí pro swap |
+| **snake / tetris / game of life / sněžení** | černé, na moduly zarovnané pixely kreslené **přímo v QR** (`js/mask-arcade.js`) – had prolézá kódem, glidery z Game of Life přes něj procházejí, tetromina jím propadávají, sníh po něm padá. Entity jsou řídké a stále v pohybu, takže v každém okamžiku je překryto jen pár modulů (v rámci RS korekce v4+H ~30 %), zatímco pohyb přes měněnou oblast skryje flip |
 | **žádné** | bez maskování |
 
 ## UI
