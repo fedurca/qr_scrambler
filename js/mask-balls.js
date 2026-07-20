@@ -630,6 +630,124 @@
     this.pruneBallQueues(now);
   };
 
+  /**
+   * Snapshot at the exact QR flip paint moment:
+   * change time, each changed module (row/col + px), ball positions, cover hit/miss.
+   */
+  MaskBalls.prototype.reportFlipCover = function (opts) {
+    opts = opts || {};
+    var now = opts.flipAtMs != null ? opts.flipAtMs : Date.now();
+    var qr = this.getQrRect() || this.qrRect;
+    var diffs = opts.diffs || [];
+    var size = opts.moduleSize || 0;
+    var margin = opts.margin != null ? opts.margin : 2;
+    var cells = [];
+    var covered = 0;
+    var uncovered = [];
+    var i;
+
+    if (qr && size > 0 && diffs.length) {
+      var n = size + margin * 2;
+      var cellW = qr.width / n;
+      var cellH = qr.height / n;
+      for (i = 0; i < diffs.length; i++) {
+        var row = diffs[i][0];
+        var col = diffs[i][1];
+        var cx = qr.left + (col + margin + 0.5) * cellW;
+        var cy = qr.top + (row + margin + 0.5) * cellH;
+        var hitBy = [];
+        var nearest = null;
+        var nearestD = Infinity;
+        for (var bi = 0; bi < this.balls.length; bi++) {
+          var b = this.balls[bi];
+          var d = hypot(b.x - cx, b.y - cy);
+          if (d < nearestD) {
+            nearestD = d;
+            nearest = b.colorId;
+          }
+          if (d <= BALL_R) hitBy.push(b.colorId);
+        }
+        var ok = hitBy.length > 0;
+        if (ok) covered++;
+        else uncovered.push(row + "," + col);
+        cells.push({
+          rc: row + "," + col,
+          x: Math.round(cx),
+          y: Math.round(cy),
+          hit: hitBy,
+          near: nearest,
+          nearD: Math.round(nearestD)
+        });
+      }
+    }
+
+    var balls = this.balls.map(function (b) {
+      var job = b.queue && b.queue[0] ? b.queue[0] : null;
+      return {
+        id: b.colorId,
+        x: Math.round(b.x),
+        y: Math.round(b.y),
+        sp: Math.round(b.speed),
+        ang: Math.round(Math.atan2(b.vy, b.vx) * 180 / Math.PI),
+        cover: !!b.covering,
+        plan: b.planKind || null,
+        job: job ? {
+          slot: job.slot,
+          tMs: Math.round(job.changeAtMs - now),
+          x: Math.round(job.x),
+          y: Math.round(job.y),
+          r: Math.round(job.r),
+          d: Math.round(hypot(b.x - job.x, b.y - job.y))
+        } : null
+      };
+    });
+
+    var planned = null;
+    for (i = 0; i < this.events.length; i++) {
+      if (Math.abs(this.events[i].changeAtMs - now) < 800 ||
+          (opts.slot != null && this.events[i].slot === opts.slot)) {
+        planned = {
+          slot: this.events[i].slot,
+          tMs: Math.round(this.events[i].changeAtMs - now),
+          diffs: this.events[i].diffCount,
+          targets: (this.events[i].targets || []).map(function (t) {
+            return {
+              x: Math.round(t.x),
+              y: Math.round(t.y),
+              r: Math.round(t.r),
+              n: t.count,
+              ball: t.assigned || null
+            };
+          })
+        };
+        break;
+      }
+    }
+
+    var report = {
+      t: new Date(now).toISOString(),
+      tMs: now,
+      slot: opts.slot != null ? opts.slot : null,
+      epoch: opts.epoch != null ? opts.epoch : null,
+      qr: qr ? {
+        l: Math.round(qr.left),
+        t: Math.round(qr.top),
+        w: Math.round(qr.width),
+        h: Math.round(qr.height)
+      } : null,
+      diffs: diffs.length,
+      covered: covered,
+      miss: diffs.length - covered,
+      pct: diffs.length ? Math.round(1000 * covered / diffs.length) / 10 : 100,
+      uncovered: uncovered.slice(0, 40),
+      cells: cells.slice(0, 48),
+      balls: balls,
+      planned: planned
+    };
+    this._lastFlipReport = report;
+    return report;
+  };
+
   MaskBalls.prototype.overlapsQr = function (ball, qr, pad) {
     if (!qr) return false;
     var p = pad != null ? pad : QR_CLEAR_PAD;

@@ -682,21 +682,19 @@
     setMeta("d-ballpos", shortBalls || "—");
     var near = (snap.qr || []).filter(function (e) { return e.inMs > -80 && e.inMs < 1200; });
     var nowMs = Date.now();
-    // Meta updates every snap; log lines ~2×/s when a flip is near
-    if (near.length && (!state._lastPlanLogMs || nowMs - state._lastPlanLogMs > 480)) {
+    // Keep continuous plan noise low — flip-moment FLIP COVER is the tuning signal
+    if (near.length && (!state._lastPlanLogMs || nowMs - state._lastPlanLogMs > 1500)) {
       state._lastPlanLogMs = nowMs;
       log("Plan tick", {
         qr: near.map(function (e) {
-          return { slot: e.slot, inMs: e.inMs, diffs: e.diffs, cells: e.cells, targets: e.targets };
+          return { slot: e.slot, inMs: e.inMs, diffs: e.diffs, cells: (e.cells || []).slice(0, 8) };
         }),
         balls: (snap.balls || []).map(function (b) {
           return {
             id: b.id,
             xy: [b.x, b.y],
             sp: b.sp,
-            q: b.q,
             pred: b.pred,
-            plan: b.plan,
             cover: b.cover
           };
         })
@@ -954,6 +952,10 @@
   }
 
   function applyFrame(epoch, canonical, result, started, fromPrefetch) {
+    var flipAtMs = Date.now();
+    var prevForDiff = state.prevModules;
+    var flipDiffs = prevForDiff ? listDiffs(prevForDiff, result.modules) : [];
+
     var decodedText = state.decoder ? decodeModules(result.modules) : canonical.url;
     var decodedEpoch = codec.decodePayload(decodedText || canonical.url);
     if (decodedEpoch !== epoch) {
@@ -965,6 +967,7 @@
         mode: "canonical-safe"
       };
       decodedEpoch = epoch;
+      flipDiffs = prevForDiff ? listDiffs(prevForDiff, result.modules) : [];
     }
 
     state.pad = canonical.pad;
@@ -997,7 +1000,26 @@
     setStatus("ok", "ok");
 
     if (state.maskBalls && state.maskBalls.enabled) {
+      var flipReport = state.maskBalls.reportFlipCover({
+        flipAtMs: flipAtMs,
+        slot: currentSlot(),
+        epoch: decodedEpoch,
+        diffs: flipDiffs,
+        moduleSize: moduleSize(result.modules),
+        margin: MARGIN
+      });
       state.maskBalls.notifyChanged();
+      state.lastFlipReport = flipReport;
+      setMeta(
+        "d-flip",
+        flipReport.t.slice(11, 23) +
+          " cover " + flipReport.covered + "/" + flipReport.diffs +
+          " (" + flipReport.pct + "%)" +
+          (flipReport.miss ? " miss[" + flipReport.uncovered.slice(0, 8).join(" ") + "]" : " OK")
+      );
+      log("FLIP COVER", flipReport);
+    } else {
+      setMeta("d-flip", "balls off");
     }
 
     if (state.renders <= 5 || state.renders % 30 === 0) {
@@ -1191,6 +1213,7 @@
 
   document.getElementById("btn-copy").addEventListener("click", function () {
     var payload = {
+      appVersion: window.APP_VERSION || null,
       engine: state.engineId,
       source: state.source,
       decoder: state.decoderSource,
@@ -1205,6 +1228,7 @@
       renders: state.renders,
       lastUrl: state.lastUrl,
       lastError: state.lastError,
+      lastFlip: state.lastFlipReport || null,
       log: logEl.textContent,
       userAgent: navigator.userAgent,
       href: location.href
