@@ -61,6 +61,7 @@ ${css}
         <option value="chg4">Změny z 4 iterací</option>
         <option value="chg5">Změny z 5 iterací</option>
         <option value="chg6">Změny z 6 iterací</option>
+        <option value="chgmin">Nejjemnější (z 20 it.)</option>
         <option value="none">Žádné</option>
       </select>
     </label>

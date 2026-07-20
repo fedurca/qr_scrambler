@@ -100,6 +100,9 @@
     maskMethod: "snow3",
     forecastSteps: 1,
     futureDiffs: [],
+    gentleMode: false,
+    gentleCells: [],
+    _gentleAt: 0,
     pendingDiffs: null,
     forecastHorizon: 8,
     lastPlanSnap: null
@@ -950,6 +953,44 @@
     if (state.prefetch) state.prefetch.cancelled = true;
   }
 
+  /**
+   * Cheap N-iteration outlook for the "gentlest transition" mask (chgmin):
+   * walk N future canonical (min-raw, no stabilize) frames and count, per module,
+   * in how many of them it differs from the CURRENT code. Cells that differ the
+   * LEAST are ranked first — pre-blinking only those keeps the transition subtle.
+   * Only data modules change, so the ranked list is inherently non-reserved.
+   */
+  async function computeGentleForecast(steps, shouldCancel) {
+    if (!state.api || !state.prevModules) return;
+    var cur = state.prevModules;
+    var size = moduleSize(cur);
+    var freq = new Uint16Array(size * size);
+    var interval = getEpochIntervalSec();
+    var baseSlot = currentSlot();
+    var mods = cur;
+    var pad = state.pad;
+    for (var step = 1; step <= steps; step++) {
+      if (shouldCancel && shouldCancel()) return;
+      var epoch = (baseSlot + step) * interval;
+      var canon = chooseCanonical(state.api, epoch, mods, pad);
+      var f = canon.modules;
+      for (var r = 0; r < size; r++) {
+        for (var c = 0; c < size; c++) {
+          if (!!moduleGet(cur, r, c) !== !!moduleGet(f, r, c)) freq[r * size + c] += 1;
+        }
+      }
+      mods = f;
+      pad = canon.pad;
+      if (step % 4 === 0) await yieldToBrowser();
+    }
+    var cells = [];
+    for (var i = 0; i < freq.length; i++) {
+      if (freq[i] > 0) cells.push([(i / size) | 0, i % size, freq[i]]);
+    }
+    cells.sort(function (a, b) { return a[2] - b[2]; }); // least-differing first
+    state.gentleCells = cells.map(function (x) { return [x[0], x[1]]; });
+  }
+
   function formatPlanMeta(snap) {
     if (!snap) return "—";
     var qrParts = (snap.qr || []).map(function (e) {
@@ -1105,6 +1146,12 @@
         mods = frame.result.modules;
         pad = frame.canonical.pad;
         await yieldToBrowser();
+      }
+
+      // Gentlest-transition outlook (throttled — the ranking drifts slowly).
+      if (!token.cancelled && state.gentleMode && Date.now() - state._gentleAt > 2000) {
+        state._gentleAt = Date.now();
+        await computeGentleForecast(20, function () { return token.cancelled; });
       }
 
       if (!token.cancelled && events.length) {
@@ -1452,6 +1499,9 @@
     // N-step forecast horizon.
     var chg = /^chg([1-6])$/.exec(method);
     state.forecastSteps = chg ? parseInt(chg[1], 10) : 1;
+    // "chgmin": preview only the least-differing cells from a 20-iteration outlook.
+    state.gentleMode = method === "chgmin";
+    if (state.gentleMode) state._gentleAt = 0; // force recompute on switch
     if (state.maskBalls) state.maskBalls.setEnabled(ballsOn);
     if (state.maskFx) state.maskFx.setMethod(method);
     setMeta("d-mask", method);
@@ -1493,6 +1543,8 @@
         // iterations (from the multi-step forecast). Snow variants pre-blink
         // these so the real change blends into the flicker.
         getChangingCells: function (n) { return unionFutureDiffs(n || 1); },
+        // Cells (ranked least-differing-first) for the "gentlest transition" variant.
+        getGentleCells: function () { return state.gentleCells || []; },
         onLog: function (msg, detail) { log(msg, detail); }
       });
     }

@@ -38,17 +38,18 @@
       ? new global.MaskArcade({
           getQrInfo: this.getQrInfo,
           getQrRect: this.getQrRect,
-          getChangingCells: opts.getChangingCells || function () { return []; }
+          getChangingCells: opts.getChangingCells || function () { return []; },
+          getGentleCells: opts.getGentleCells || function () { return []; }
         })
       : null;
   }
 
   MaskFx.OPTIONS = ["crossfade", "balls", "shimmer", "softpatch", "snake", "tetris", "life",
     "snow", "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
-    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "none"];
+    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin", "none"];
   MaskFx.ARCADE = ["snake", "tetris", "life", "snow",
     "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
-    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6"];
+    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin"];
 
   MaskFx.prototype.ensureCanvas = function () {
     if (this.canvas) return this.canvas;

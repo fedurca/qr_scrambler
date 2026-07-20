@@ -21,7 +21,7 @@
     snake: 110, tetris: 130, life: 160, snow: 120,
     snow1: 100, snow2: 100, snow3: 110, snow4: 100, snow5: 90,
     snow6: 100, snow7: 90, snow8: 80,
-    chg1: 110, chg2: 110, chg3: 110, chg4: 110, chg5: 110, chg6: 110
+    chg1: 110, chg2: 110, chg3: 110, chg4: 110, chg5: 110, chg6: 110, chgmin: 120
   };
   var INK = "#000000";
 
@@ -29,6 +29,7 @@
     opts = opts || {};
     this.getQrInfo = opts.getQrInfo || function () { return null; };
     this.getChangingCells = opts.getChangingCells || function () { return []; };
+    this.getGentleCells = opts.getGentleCells || function () { return []; };
     this.mode = null;
     this.canvas = null;
     this.ctx = null;
@@ -46,9 +47,9 @@
 
   MaskArcade.MODES = ["snake", "tetris", "life", "snow",
     "snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
-    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6"];
+    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin"];
   MaskArcade.FLICKER = ["snow1", "snow2", "snow3", "snow4", "snow5", "snow6", "snow7", "snow8",
-    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6"];
+    "chg1", "chg2", "chg3", "chg4", "chg5", "chg6", "chgmin"];
 
   // Safe overlaid-module fraction by ECC level: the reader must still correct the
   // overlaid cells as errors, so keep well under floor(EC/2). Roughly half the
@@ -330,15 +331,16 @@
   MaskArcade.prototype.newFlicker = function (mode) {
     // "chgN" = preview the union of the next N iterations' changes (falling-snow
     // decoy style). "snowN" = single-iteration variant N.
-    var isChg = mode.indexOf("chg") === 0;
-    var v = isChg ? 3 : (parseInt(mode.slice(4), 10) || 1);
+    var gentle = mode === "chgmin";
+    var isChg = !gentle && mode.indexOf("chg") === 0;
+    var v = (gentle || isChg) ? 3 : (parseInt(mode.slice(4), 10) || 1);
     var horizon = isChg ? (parseInt(mode.slice(3), 10) || 1) : 1;
     var flakes = [];
-    if (v === 3) {
+    if (v === 3 && !gentle) {
       var n = Math.max(4, (this.size * 0.35) | 0);
       for (var i = 0; i < n; i++) flakes.push({ x: (Math.random() * this.size) | 0, y: Math.random() * this.size, v: 0.5 + Math.random() });
     }
-    return { variant: v, horizon: horizon, scanRow: 0, phase: 0, flakes: flakes };
+    return { variant: gentle ? 1 : v, horizon: horizon, gentle: gentle, scanRow: 0, phase: 0, flakes: flakes };
   };
 
   MaskArcade.prototype.stepFlicker = function () {
@@ -414,7 +416,9 @@
     this.beginInk();
     var st = this.state;
     var cap = this.perFrameCap;
-    var changing = this.getChangingCells(st.horizon || 1) || [];
+    var changing = st.gentle
+      ? (this.getGentleCells() || [])
+      : (this.getChangingCells(st.horizon || 1) || []);
     var changingSet = {};
     for (var ci = 0; ci < changing.length; ci++) changingSet[changing[ci][0] + "," + changing[ci][1]] = 1;
     var seen = {};
@@ -430,15 +434,21 @@
     // v6 (camouflage) shows ~half changes / half stable so they look identical;
     // v8 (static) lets the dense decoys dominate. Others favour the changes.
     var chgCap;
-    if (st.variant === 1) chgCap = cap;
+    if (st.gentle) chgCap = Math.max(3, Math.floor(cap * 0.5));
+    else if (st.variant === 1) chgCap = cap;
     else if (st.variant === 6) chgCap = Math.floor(cap * 0.5);
     else if (st.variant === 8) chgCap = Math.floor(cap * 0.4);
     else chgCap = Math.ceil(cap * 0.65);
-    var chg = changing.slice();
+    // Gentle mode: draw from the FRONT of the list (least-differing cells), only
+    // lightly rotated, so the previewed set stays the subtlest possible.
+    var chg;
+    if (st.gentle) chg = changing.slice(0, Math.max(chgCap * 3, 12));
+    else chg = changing.slice();
     for (var s = chg.length - 1; s > 0; s--) { var j = (Math.random() * (s + 1)) | 0; var t = chg[s]; chg[s] = chg[j]; chg[j] = t; }
+    var blinkP = st.gentle ? 0.55 : 0.72;
     var cc = 0;
     for (var i = 0; i < chg.length && cc < chgCap; i++) {
-      if (Math.random() < 0.72) { add(chg[i][0], chg[i][1]); cc++; }
+      if (Math.random() < blinkP) { add(chg[i][0], chg[i][1]); cc++; }
     }
     // Priority 2: variant decoys fill the remaining budget.
     var decoys = this.decoysFor(st, changing, changingSet);

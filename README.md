@@ -60,7 +60,10 @@ Výběr metody v UI (`Maskování`), default **Změny + sníh**. Varianty **pře
 | **Interlace** (snow7) | prokládané řádky problikávají (efekt vadného řádkování) |
 | **Statika** (snow8) | hustá „TV statika" po celé datové ploše, změny v ní zaniknou |
 | **Změny z N iterací** (chg1–chg6) | předblikává **sjednocení změn z příštích N iterací** (N=1–6, z vícekrokového forecastu) ve stylu padajícího sněhu; napovídá i vzdálenější změny |
+| **Nejjemnější** (chgmin) | z **20-krokového výhledu** vybere jen buňky, které se od aktuálního kódu **liší nejméně** (nejnižší frekvence odlišnosti přes horizont), a ty jemně problikává → přechod je co nejméně znatelný |
 | **žádné** | bez maskování |
+
+`chgmin` počítá 20-krokový výhled levně (jen canonical, bez stabilizace, throttlováno ~2 s) a moduly řadí vzestupně podle toho, jak často se přes horizont liší od aktuálního kódu; bliká jen tu nejjemnější (přední) část, ≤ `perFrameCap` na snímek.
 
 U `chgN` se forecast počítá N kroků dopředu; sjednocení může být velké, ale na snímek se stále inkoustí jen ≤ `perFrameCap` buněk, takže kód zůstává čitelný. Při 1s taktu se vyšší N nemusí stihnout spočítat celé — použije se tolik iterací, kolik forecast stihl.
 
