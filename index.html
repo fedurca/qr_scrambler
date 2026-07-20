@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="application-version" content="1.6.0" />
-  <title>v1.6.0 het68 QR</title>
+  <meta name="application-version" content="1.6.1" />
+  <title>v1.6.1 het68 QR</title>
   <style>
 :root {
   color-scheme: dark;
@@ -38,6 +38,11 @@ body {
   justify-content: flex-start;
   gap: 16px;
   padding: 72px 16px 96px;
+}
+
+/* Fallback clearance for the fixed controls bar (JS refines it precisely). */
+@media (max-width: 560px) {
+  body { padding-top: 124px; }
 }
 
 #controls {
@@ -304,7 +309,7 @@ main {
     </header>
     <div class="body">
       <dl>
-        <dt>version</dt><dd id="d-version">1.6.0</dd>
+        <dt>version</dt><dd id="d-version">1.6.1</dd>
         <dt>engine</dt><dd id="d-engine">—</dd>
         <dt>source</dt><dd id="d-source">—</dd>
         <dt>decoder</dt><dd id="d-decoder">—</dd>
@@ -10454,7 +10459,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
 });
   </script>
   <script>
-window.APP_VERSION="1.6.0";
+window.APP_VERSION="1.6.1";
 
   </script>
   <script>
@@ -14751,9 +14756,22 @@ window.APP_VERSION="1.6.0";
     }
   }
 
+  // Keep the QR clear of the fixed controls bar (it wraps to 2+ rows on mobile).
+  function adjustLayout() {
+    var c = document.getElementById("controls");
+    if (c) document.body.style.paddingTop = (c.offsetHeight + 20) + "px";
+  }
+
   function bindControls() {
     var intervalInput = document.getElementById("epoch-interval");
     var methodSelect = document.getElementById("mask-method");
+
+    adjustLayout();
+    window.addEventListener("resize", adjustLayout);
+    window.addEventListener("orientationchange", adjustLayout);
+    // Re-measure once fonts/layout settle (bar height can grow after load).
+    setTimeout(adjustLayout, 300);
+    setTimeout(adjustLayout, 1200);
 
     if (typeof MaskBalls === "function") {
       state.maskBalls = new MaskBalls({

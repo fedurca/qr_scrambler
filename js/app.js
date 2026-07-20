@@ -1432,9 +1432,22 @@
     }
   }
 
+  // Keep the QR clear of the fixed controls bar (it wraps to 2+ rows on mobile).
+  function adjustLayout() {
+    var c = document.getElementById("controls");
+    if (c) document.body.style.paddingTop = (c.offsetHeight + 20) + "px";
+  }
+
   function bindControls() {
     var intervalInput = document.getElementById("epoch-interval");
     var methodSelect = document.getElementById("mask-method");
+
+    adjustLayout();
+    window.addEventListener("resize", adjustLayout);
+    window.addEventListener("orientationchange", adjustLayout);
+    // Re-measure once fonts/layout settle (bar height can grow after load).
+    setTimeout(adjustLayout, 300);
+    setTimeout(adjustLayout, 1200);
 
     if (typeof MaskBalls === "function") {
       state.maskBalls = new MaskBalls({
