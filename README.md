@@ -24,40 +24,39 @@ Na přijímací straně stačí po naskenování zavolat `decodePayload()` a pad
 
 ## Jak se drží minimální změna
 
-1. **Kompaktní QR** – maximálně **version 3** (29×29, ≈ 3 finder bloky na šířku), ECC **L**.
+1. **Vyšší ECC rezerva místo nižší** – default **version 4 + ECC Q** (33×33). Pad se dopočítává na kapacitu (`computePadLen`), takže payload nikdy nepřeteče; jediná cena vyšší verze je hustota, kterou vyrovná větší `DRAW_SIZE`. Víc opravných codewordů = větší Reed-Solomonův basin = stabilizér smí ponechat víc modulů shodných s předchozím snímkem. Pro nejmenší změny lze přepnout na `{ version: 5, ecc: "H" }` (`VERSION`/`ECC` v `js/app.js`) po ověření čitelnosti na levném telefonu.
 2. **Dlouhý padding** – epoch je v dlouhém stringu, který vyplní kapacitu symbolu.
 3. **Structure-aware pad** – mutace hlavně **suffixu** padu (konec QR data bitstreamu / padding codewords).
-4. **Dual-direction ECC stabilizace** – from-old + from-new + mutace + polish, řazení diffů podle zigzag oblasti.
-5. **Prefetch** – výpočet pro `epoch+1` během aktuální sekundy.
-6. **Okamžitý canonical paint** + render fallback řetězec: **canvas → SVG → img(SVG)** (na mobilu SVG první).
+4. **Analytický codeword-stabilizér** (`js/qr-structure.js`) – každý modul patří právě jednomu codewordu (deterministický zigzag placement). Dekódování přežije, dokud se od cíle liší ≤ `floor(EC/2)` codewordů; codeword s 1 rozdílným modulem stojí stejně jako s 8. Stabilizér proto **seskupí diffy podle codewordu** a ponechá předchozí moduly v těch codewordech, kde se prev a cíl liší nejvíc, se sekundárním kritériem **shlukování** do souvislé oblasti. Výsledek se vždy **jednorázově ověří dekodérem**; při selhání je fallback na heuristické dual-direction půlení.
+5. **Top-N kandidátů** – stabilizuje se víc pad-suffix kandidátů (ne jen nejmenší raw diff) a drží se globální minimum flipů.
+6. **Prefetch** – výpočet pro `epoch+1` během aktuálního intervalu.
+7. **Okamžitý canonical paint** + render fallback řetězec: **canvas → SVG → img(SVG)** (na mobilu SVG první). Pro crossfade se okamžitý paint odloží, aby změna „naběhla" z předchozího snímku.
 
-### Orientační výsledky (stabilize)
+### Boot měření
 
-| config | avg flips | % modulů |
-| --- | ---: | ---: |
-| v40 + **Q** + dual + prefetch budget | ~85 | **~0.27 %** |
-| v40 + L + single-direction | ~100 | ~0.32 % |
-| v15 + H (starší) | ~60 | ~1.0 %+ |
+Pár sekund po startu se do debug logu vypíše `Grid measure` – průměrné flipy pro profily `v4Q`, `v5H`, `v3L` na několika syntetických přechodech (pomůcka pro volbu mřížky, neběží za provozu).
 
 Hard floor: dvě různá QR data musí ležet v různých RS codeword basins; pod ~0.2–0.25 % už typicky nejde bez změny protokolu (ne-standardní kódování mimo QR payload).
 
-## Typická změna mezi snímky
+## Maskování změny (aby nebyla vidět)
 
-| profil | typicky |
+Výběr metody v UI (`Maskování`), default **crossfade**:
+
+| metoda | popis |
 | --- | --- |
-| v3 / L | malý QR (29 modulů), méně hustý než dřívější v40 |
-
-Debug pole `~CSS px` ukazuje odhad podle aktuální velikosti QR na obrazovce.
+| **crossfade** (default) | jen měněné buňky přejdou opacitou prev→new za ~260 ms; swap je odložen za overlay (přirozený paint gate), takže nikdy nedojde k viditelnému „lupnutí" |
+| **koule** | 7 koulí **R G B C M Y K** letí rovně, směr mění jen odrazem od okrajů; RGB aditivně, CMYK substraktivně (skupiny se nemíchají); změny se počítají dopředu a koule je krátce překryjí |
+| **shimmer** | trvalý jemný nízkokontrastní dither přes celý symbol – reálná změna zanikne v ambientní mikrodynamice |
+| **měkká záplata** | tlumený rozmazaný blob v barvě kódu krátce překryje měněné buňky, swap proběhne pod ním, pak vyprchá |
+| **žádné** | bez maskování |
 
 ## UI
 
-- černé pozadí, QR uprostřed
-- pod QR aktuální URL
-- **Interval epochy (s)** – jak často se QR přegeneruje (default 1 s)
-- **Maskovací koule** – volitelné (default vypnuté); 7 koulí **R G B C M Y K**, letí rovně a směr mění jen odrazem od okrajů obrazovky; QR změny se počítají několik kroků dopředu, překrytí je jen krátký průlet
-- při průniku: **RGB aditivně**, **CMYK substraktivně** (skupiny se navzájem nemíchají)
+- černé pozadí, QR uprostřed, pod QR aktuální URL
+- **Interval epochy (s)** – jak často se QR přegeneruje (default 5 s)
+- **Maskování** – výběr metody (default crossfade)
 - title stránky nese semver (`het68 QR vX.Y.Z`, viz `package.json`)
-- debug: version, engine, decoder, epoch, raw Δ, flips, %, ~CSS px
+- debug: version, engine, decoder, ecc/ver, mask, epoch, raw Δ, flips, %, ~CSS px
 
 ## Deploy / self-contained `index.html`
 

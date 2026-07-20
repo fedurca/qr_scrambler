@@ -79,6 +79,21 @@ body {
   accent-color: var(--ok);
 }
 
+#controls select {
+  background: #000;
+  color: var(--fg);
+  border: 1px solid #444;
+  padding: 4px 6px;
+  font: inherit;
+  cursor: pointer;
+}
+
+#mask-fx-canvas {
+  position: fixed;
+  pointer-events: none;
+  z-index: 30;
+}
+
 main {
   display: flex;
   flex-direction: column;

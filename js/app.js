@@ -19,12 +19,24 @@
     }
   })();
 
-  // Max QR version 3 (29 modules ≈ 3 finder-sized blocks across).
-  var VERSION = 3;
-  var ECC = "L";
+  // Grid profile. Higher ECC = larger Reed-Solomon basin = the stabilizer may
+  // keep far more modules identical to the previous frame (fewer flips). The pad
+  // auto-fills to capacity (see computePadLen), so payload never overflows — the
+  // only cost of a higher version is module density, offset by a larger DRAW_SIZE.
+  // v4 + Q is one step denser than the old v3 (33x33 vs 29x29) but ~2.5x the EC
+  // budget. Switch to { version: 5, ecc: "H" } for the fewest flips once a cheap
+  // phone confirms readability. Boot logs "Grid measure" to compare profiles.
+  var VERSION = 4;
+  var ECC = "Q";
   var MARGIN = 2;
-  var DRAW_SIZE = IS_MOBILE ? 220 : 240;
+  var DRAW_SIZE = IS_MOBILE ? 260 : 300;
   var DECODE_SCALE = 4;
+  /** Candidate profiles for the boot-time flip measurement (tuning aid only). */
+  var GRID_PROFILES = [
+    { version: 4, ecc: "Q" },
+    { version: 5, ecc: "H" },
+    { version: 3, ecc: "L" }
+  ];
   var STABILIZE_BUDGET_MS = IS_MOBILE ? 350 : 500;
   var PREFETCH_BUDGET_MS = IS_MOBILE ? 550 : 800;
   var PAD_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -77,6 +89,8 @@
     paintEl: null,
     epochIntervalSec: 5,
     maskBalls: null,
+    maskFx: null,
+    maskMethod: "crossfade",
     pendingDiffs: null,
     forecastHorizon: 8,
     lastPlanSnap: null
@@ -292,7 +306,9 @@
     return chars.join("");
   }
 
-  function computePadLen(api) {
+  function computePadLen(api, version, ecc) {
+    version = version || VERSION;
+    ecc = ecc || ECC;
     var probe = String(Math.floor(Date.now() / 1000)) + ".";
     var prefix = codec.BASE + probe;
     var lo = 0;
@@ -302,10 +318,10 @@
       var mid = (lo + hi) >> 1;
       try {
         var q = api.create(prefix + Array(mid + 1).join("A"), {
-          version: VERSION,
-          errorCorrectionLevel: ECC
+          version: version,
+          errorCorrectionLevel: ecc
         });
-        if (q.version !== VERSION) hi = mid - 1;
+        if (q.version !== version) hi = mid - 1;
         else {
           best = mid;
           lo = mid + 1;
@@ -317,10 +333,10 @@
     return best;
   }
 
-  function createModules(api, text, maskPattern) {
+  function createModules(api, text, maskPattern, version, ecc) {
     return api.create(text, {
-      version: VERSION,
-      errorCorrectionLevel: ECC,
+      version: version || VERSION,
+      errorCorrectionLevel: ecc || ECC,
       maskPattern: maskPattern
     }).modules;
   }
@@ -491,13 +507,84 @@
     throw new Error("All render methods failed: " + errors.join(" | "));
   }
 
-  function considerCandidate(best, modules, targetUrl, prev) {
+  function considerCandidate(best, modules, targetUrl, prev, tag) {
     if (decodeModules(modules) !== targetUrl) return best;
     var flips = hamming(prev, modules);
     if (!best || flips < best.flips) {
-      return { flips: flips, modules: copyModules(modules) };
+      return { flips: flips, modules: copyModules(modules), tag: tag || (best && best.tag) || "stabilize" };
     }
     return best;
+  }
+
+  function setGroupCells(work, group, src) {
+    for (var i = 0; i < group.cells.length; i++) {
+      var rc = group.cells[i];
+      work.set(rc[0], rc[1], moduleGet(src, rc[0], rc[1]));
+    }
+  }
+
+  /**
+   * Analytic codeword stabilizer: keep the previous frame's modules in the
+   * codewords where prev and target diverge the most, take target elsewhere.
+   * Groups diffs by owning codeword, biases selection toward one contiguous
+   * region (fewer, tighter flips), then verifies with the decoder — a fast
+   * "sacrifice all" path first, else greedy accept-if-still-decodes. The
+   * returned matrix always decodes to the target (each step is verified).
+   */
+  function analyticStabilize(prev, neu, targetUrl, d, deadline, shouldCancel) {
+    if (!window.QRStructure) return null;
+    var cwMap = window.QRStructure.buildCodewordMap(neu);
+    var size = cwMap.size;
+    var groups = {};
+    var i, rc, cw, g;
+    for (i = 0; i < d.length; i++) {
+      rc = d[i];
+      cw = cwMap.cwIndex[rc[0] * size + rc[1]];
+      if (cw < 0) continue;
+      g = groups[cw];
+      if (!g) { g = { cw: cw, cells: [], sx: 0, sy: 0 }; groups[cw] = g; }
+      g.cells.push(rc);
+      g.sx += rc[1];
+      g.sy += rc[0];
+    }
+    var list = [];
+    for (var k in groups) {
+      if (!groups.hasOwnProperty(k)) continue;
+      g = groups[k];
+      g.save = g.cells.length;
+      g.cx = g.sx / g.save;
+      g.cy = g.sy / g.save;
+      list.push(g);
+    }
+    if (!list.length) return null;
+
+    // Phase D: cluster flips. Savings dominate (integer module counts); the
+    // distance-to-centroid term is < 1 module, so it only breaks ties toward a
+    // single contiguous region that a mask can cover more easily.
+    var tsx = 0, tsy = 0, tw = 0;
+    for (i = 0; i < list.length; i++) { tsx += list[i].cx * list[i].save; tsy += list[i].cy * list[i].save; tw += list[i].save; }
+    var mcx = tw ? tsx / tw : 0;
+    var mcy = tw ? tsy / tw : 0;
+    var diag = Math.max(1, size * 1.4142);
+    list.sort(function (a, b) {
+      var da = Math.sqrt((a.cx - mcx) * (a.cx - mcx) + (a.cy - mcy) * (a.cy - mcy));
+      var db = Math.sqrt((b.cx - mcx) * (b.cx - mcx) + (b.cy - mcy) * (b.cy - mcy));
+      return (b.save - 0.6 * (db / diag)) - (a.save - 0.6 * (da / diag));
+    });
+
+    // Fast path: sacrifice every diverging codeword at once.
+    var work = copyModules(neu);
+    for (i = 0; i < list.length; i++) setGroupCells(work, list[i], prev);
+    if (decodeModules(work) === targetUrl) return work;
+
+    // Greedy + verify: accept each codeword's sacrifice only if it still decodes.
+    work = copyModules(neu);
+    for (var j = 0; j < list.length; j++) {
+      if (Date.now() >= deadline || (shouldCancel && shouldCancel())) break;
+      setGroupCells(work, list[j], prev);
+      if (decodeModules(work) !== targetUrl) setGroupCells(work, list[j], neu);
+    }
+    return work;
   }
 
   async function stabilize(prev, neu, targetUrl, budgetMs, shouldCancel) {
@@ -517,12 +604,21 @@
 
     var started = Date.now();
     var deadline = started + budgetMs;
-    var best = { flips: listDiffs(prev, neu).length, modules: copyModules(neu) };
+    var best = { flips: listDiffs(prev, neu).length, modules: copyModules(neu), tag: "canonical" };
     var orders = 0;
     var size = moduleSize(neu);
 
-    best = considerCandidate(best, neu, targetUrl, prev);
+    best = considerCandidate(best, neu, targetUrl, prev, "canonical");
 
+    // Primary: analytic codeword pass (near-optimal in one shot, verified).
+    try {
+      var analytic = analyticStabilize(prev, neu, targetUrl, d, deadline, shouldCancel);
+      if (analytic) best = considerCandidate(best, analytic, targetUrl, prev, "analytic");
+    } catch (e) {
+      log("Analytic stabilize skipped", String(e && e.message ? e.message : e));
+    }
+
+    // Refinement/fallback: heuristic dual-direction search with remaining budget.
     while (Date.now() < deadline) {
       if (shouldCancel && shouldCancel()) break;
       orders += 1;
@@ -552,7 +648,7 @@
           hi = mid - 1;
         } else lo = mid + 1;
       }
-      best = considerCandidate(best, ansOld, targetUrl, prev);
+      best = considerCandidate(best, ansOld, targetUrl, prev, "heuristic");
 
       // from-new
       lo = 0;
@@ -569,7 +665,7 @@
           lo = mid + 1;
         } else hi = mid - 1;
       }
-      best = considerCandidate(best, ansNew, targetUrl, prev);
+      best = considerCandidate(best, ansNew, targetUrl, prev, "heuristic");
 
       var mut = copyModules(best.modules);
       var mcount = 1 + ((Math.random() * 3) | 0);
@@ -577,7 +673,7 @@
         var cell = d[(Math.random() * d.length) | 0];
         mut.set(cell[0], cell[1], moduleGet(prev, cell[0], cell[1]));
       }
-      best = considerCandidate(best, mut, targetUrl, prev);
+      best = considerCandidate(best, mut, targetUrl, prev, "heuristic");
 
       if (orders % 2 === 0) await yieldToBrowser();
     }
@@ -601,7 +697,7 @@
       flips: hamming(prev, polished),
       raw: listDiffs(prev, neu).length,
       orders: orders,
-      mode: "ecc-stabilize"
+      mode: "ecc-" + (best.tag || "stabilize")
     };
   }
 
@@ -629,13 +725,40 @@
     return best;
   }
 
+  /** Top-N canonical candidates ordered by raw diff (for multi-candidate stabilize). */
+  function chooseCanonicalList(api, epoch, prevModules, prevPad, topN) {
+    var cands = [];
+    function consider(pad, mask) {
+      var url = buildUrl(epoch, pad);
+      var modules = createModules(api, url, mask);
+      var raw = prevModules ? listDiffs(prevModules, modules).length : 0;
+      cands.push({ url: url, pad: pad, mask: mask, modules: modules, raw: raw });
+    }
+    var mask;
+    for (mask = 0; mask < 8; mask++) consider(prevPad, mask);
+    cands.sort(function (a, b) { return a.raw - b.raw; });
+    var basePad = cands[0].pad;
+    var baseMask = cands[0].mask;
+    for (var t = 0; t < 12; t++) consider(mutatePadSuffix(basePad, state.padLen), baseMask);
+    cands.sort(function (a, b) { return a.raw - b.raw; });
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < cands.length && out.length < (topN || 3); i++) {
+      var key = cands[i].mask + "|" + cands[i].url;
+      if (seen[key]) continue;
+      seen[key] = 1;
+      out.push(cands[i]);
+    }
+    return out;
+  }
+
   async function buildFrame(api, epoch, prevModules, prevPad, budgetMs, shouldCancel) {
-    var canonical = chooseCanonical(api, epoch, prevModules, prevPad || state.pad);
     if (!prevModules) {
+      var first = chooseCanonical(api, epoch, prevModules, prevPad || state.pad);
       return {
-        canonical: canonical,
+        canonical: first,
         result: {
-          modules: copyModules(canonical.modules),
+          modules: copyModules(first.modules),
           flips: 0,
           raw: 0,
           orders: 0,
@@ -643,14 +766,107 @@
         }
       };
     }
-    var result = await stabilize(
-      prevModules,
-      canonical.modules,
-      canonical.url,
-      budgetMs,
-      shouldCancel
-    );
-    return { canonical: canonical, result: result };
+
+    // Stabilize the top-N lowest-raw candidates and keep the global minimum:
+    // a higher-raw candidate often stabilizes to fewer flips than the lowest-raw one.
+    var cands = chooseCanonicalList(api, epoch, prevModules, prevPad || state.pad, 3);
+    var deadlineAll = Date.now() + budgetMs;
+    var perBudget = Math.max(90, Math.floor(budgetMs / cands.length));
+    var bestCanon = null;
+    var bestRes = null;
+    for (var i = 0; i < cands.length; i++) {
+      if (shouldCancel && shouldCancel()) break;
+      var remaining = deadlineAll - Date.now();
+      if (remaining <= 40 && bestRes) break;
+      var b = Math.max(60, Math.min(perBudget, remaining));
+      var res = await stabilize(prevModules, cands[i].modules, cands[i].url, b, shouldCancel);
+      if (!bestRes || res.flips < bestRes.flips) {
+        bestRes = res;
+        bestCanon = cands[i];
+      }
+      if (bestRes.flips <= 2) break; // already near-optimal
+    }
+    if (!bestRes) {
+      bestCanon = cands[0];
+      bestRes = {
+        modules: copyModules(cands[0].modules),
+        flips: cands[0].raw,
+        raw: cands[0].raw,
+        orders: 0,
+        mode: "canonical"
+      };
+    }
+    return { canonical: bestCanon, result: bestRes };
+  }
+
+  function zeroPad(len) {
+    return len > 0 ? Array(len + 1).join("0") : "";
+  }
+
+  /** Canonical (min raw-diff) frame for an explicit profile — used by measureGrid. */
+  function canonicalForProfile(api, epoch, prevModules, prevPad, padLen, version, ecc) {
+    var best = null;
+    function consider(pad, mask) {
+      var url = buildUrl(epoch, pad);
+      var modules = createModules(api, url, mask, version, ecc);
+      var raw = prevModules ? listDiffs(prevModules, modules).length : 0;
+      if (!best || raw < best.raw) best = { url: url, pad: pad, mask: mask, modules: modules, raw: raw };
+    }
+    for (var mask = 0; mask < 8; mask++) consider(prevPad, mask);
+    for (var t = 0; t < 10; t++) consider(mutatePadSuffix(best.pad, padLen), best.mask);
+    return best;
+  }
+
+  /**
+   * Boot-time tuning aid: for each candidate grid profile, measure average
+   * stabilized flips over a few synthetic sequential epochs. Read-only w.r.t.
+   * live state; logged as "Grid measure" so a profile can be chosen after a
+   * real cheap-phone readability check. Never blocks the live tick.
+   */
+  async function measureGrid(api, steps) {
+    if (!api || !state.decoder) return;
+    steps = steps || 4;
+    var baseEpoch = Math.floor(Date.now() / 1000);
+    var results = [];
+    for (var pi = 0; pi < GRID_PROFILES.length; pi++) {
+      var prof = GRID_PROFILES[pi];
+      var padLen, prev = null, pad;
+      try {
+        padLen = computePadLen(api, prof.version, prof.ecc);
+        pad = zeroPad(padLen);
+      } catch (e) { continue; }
+      var flips = [];
+      var raws = [];
+      var size = 0;
+      for (var s = 0; s < steps; s++) {
+        var epoch = baseEpoch + 1000 + pi * 100 + s; // off live epochs
+        var canon = canonicalForProfile(api, epoch, prev, pad, padLen, prof.version, prof.ecc);
+        size = moduleSize(canon.modules);
+        if (prev) {
+          var res = await stabilize(prev, canon.modules, canon.url, 140, null);
+          flips.push(res.flips);
+          raws.push(res.raw);
+          prev = res.modules;
+        } else {
+          prev = canon.modules;
+        }
+        pad = canon.pad;
+        await yieldToBrowser();
+      }
+      var avg = function (a) { return a.length ? Math.round(a.reduce(function (x, y) { return x + y; }, 0) / a.length) : 0; };
+      var total = size * size;
+      results.push({
+        v: prof.version,
+        ecc: prof.ecc,
+        modules: size,
+        avgRaw: avg(raws),
+        avgFlips: avg(flips),
+        pct: total ? +((100 * avg(flips)) / total).toFixed(3) : 0,
+        active: prof.version === VERSION && prof.ecc === ECC
+      });
+    }
+    log("Grid measure", { steps: steps, profiles: results });
+    return results;
   }
 
   function cancelPrefetch() {
@@ -712,7 +928,7 @@
       if (d) n++;
       flips.push(d);
     }
-    setMeta("d-balls", "on (H" + events.length + "/" + n + ")");
+    setMeta("d-mask", "balls (H" + events.length + "/" + n + ")");
     log("QR forecast diffs", {
       horizon: events.length,
       flips: flips,
@@ -976,7 +1192,19 @@
     state.prevModules = copyModules(result.modules);
     state.lastUrl = canonical.url;
 
-    drawModules(result.modules);
+    // Route the visual swap through the active masking method. crossfade/softpatch
+    // animate the changed cells (crossfade defers the swap behind the overlay);
+    // balls/shimmer/none commit immediately.
+    var newModules = result.modules;
+    var commit = function () { drawModules(newModules); };
+    if (state.maskFx && !state.maskFx.usesBalls() && flipDiffs.length) {
+      var cells = flipDiffs.map(function (rc) {
+        return [rc[0], rc[1], moduleGet(newModules, rc[0], rc[1]) ? 1 : 0];
+      });
+      state.maskFx.present(cells, moduleSize(newModules), MARGIN, commit);
+    } else {
+      commit();
+    }
     urlEl.textContent = canonical.url;
     setMeta("d-url", canonical.url);
     setMeta("d-epoch", String(decodedEpoch));
@@ -1024,7 +1252,7 @@
       );
       log("FLIP COVER", flipReport);
     } else {
-      setMeta("d-flip", "balls off");
+      setMeta("d-flip", state.maskMethod + " (" + flipDiffs.length + " cells)");
     }
 
     if (state.renders <= 5 || state.renders % 30 === 0) {
@@ -1075,10 +1303,15 @@
         }
 
         // Immediate canonical paint so mobile never stays blank during search.
-        var quick = chooseCanonical(state.api, epoch, state.prevModules, state.pad);
-        drawModules(quick.modules);
-        urlEl.textContent = quick.url;
-        setMeta("d-url", quick.url);
+        // For deferred-swap methods (crossfade) keep the previous frame on screen
+        // so the change fades in from it instead of popping to the canonical.
+        var deferSwap = state.prevModules && state.maskFx && state.maskFx.wantsDeferredSwap();
+        if (!deferSwap) {
+          var quick = chooseCanonical(state.api, epoch, state.prevModules, state.pad);
+          drawModules(quick.modules);
+          urlEl.textContent = quick.url;
+          setMeta("d-url", quick.url);
+        }
         setMeta("d-epoch", String(epoch));
         setMeta("d-render", state.renderMode);
         setStatus("warn", "refine");
@@ -1112,15 +1345,33 @@
       });
   }
 
+  function applyMaskMethod(method, rebuild) {
+    state.maskMethod = method;
+    var ballsOn = method === "balls";
+    if (state.maskBalls) state.maskBalls.setEnabled(ballsOn);
+    if (state.maskFx) state.maskFx.setMethod(method);
+    setMeta("d-mask", method);
+    if (ballsOn && rebuild) {
+      cancelPrefetch();
+      startPrefetch(currentSlot());
+    }
+  }
+
   function bindControls() {
     var intervalInput = document.getElementById("epoch-interval");
-    var ballsToggle = document.getElementById("mask-balls-toggle");
+    var methodSelect = document.getElementById("mask-method");
 
     if (typeof MaskBalls === "function") {
       state.maskBalls = new MaskBalls({
         getQrRect: getQrContentRect,
         onLog: function (msg, detail) { log(msg, detail); },
         onPlanDebug: onMaskPlanDebug
+      });
+    }
+    if (typeof MaskFx === "function") {
+      state.maskFx = new MaskFx({
+        getQrRect: getQrContentRect,
+        onLog: function (msg, detail) { log(msg, detail); }
       });
     }
 
@@ -1140,21 +1391,16 @@
       });
     }
 
-    if (ballsToggle) {
-      var ballsOn = !!ballsToggle.checked;
-      if (state.maskBalls) state.maskBalls.setEnabled(ballsOn);
-      setMeta("d-balls", ballsOn ? "on" : "off");
-      ballsToggle.addEventListener("change", function () {
-        var on = !!ballsToggle.checked;
-        if (state.maskBalls) state.maskBalls.setEnabled(on);
-        setMeta("d-balls", on ? "on" : "off");
-        log("Mask balls", on ? "enabled" : "disabled");
-        if (on) {
-          // Rebuild multi-step forecast immediately when enabling
-          cancelPrefetch();
-          startPrefetch(currentSlot());
-        }
+    if (methodSelect) {
+      state.maskMethod = methodSelect.value || "crossfade";
+      applyMaskMethod(state.maskMethod, false);
+      methodSelect.addEventListener("change", function () {
+        var m = methodSelect.value || "crossfade";
+        log("Mask method", m);
+        applyMaskMethod(m, true);
       });
+    } else {
+      applyMaskMethod(state.maskMethod, false);
     }
   }
 
@@ -1194,6 +1440,14 @@
         tick();
         if (state.timer) clearInterval(state.timer);
         state.timer = setInterval(tick, 100);
+        // Non-blocking tuning aid: compare grid profiles a few seconds after boot.
+        if (state.api && state.decoder) {
+          setTimeout(function () {
+            measureGrid(state.api, 4).catch(function (err) {
+              log("Grid measure error", String(err && err.message ? err.message : err));
+            });
+          }, 4000);
+        }
       })
       .catch(function (err) {
         fail(err, "boot");
@@ -1230,6 +1484,7 @@
       version: VERSION,
       ecc: ECC,
       epochIntervalSec: getEpochIntervalSec(),
+      maskMethod: state.maskMethod,
       maskBalls: !!(state.maskBalls && state.maskBalls.enabled),
       padLen: state.padLen,
       mask: state.mask,
